@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added opt-in adaptive auto-compaction that avoids insufficient shake rewrites, prefers native/text summaries, and rejects image archives without enough context headroom.
+
 ## [18.2.0] - 2026-09-15
 
 ### Breaking Changes

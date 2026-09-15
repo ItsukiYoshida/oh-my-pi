@@ -182,6 +182,46 @@ store.[^experimental-context-history]
     images as markers. Notebook quality and timely updates remain the model's
     responsibility; the mode does not automatically generate missing notes.
 
+### Adaptive method selection
+
+Set `compaction.adaptiveEnabled: true` to choose automatic methods without an
+additional model call. The default is `false`; manual `/compact`, explicit modes,
+and `/handoff` retain their existing behavior. Notes-backed context windows take
+precedence when enabled.
+
+Adaptive mode treats `compaction.methodOrder` as the set of permitted methods,
+and tries `shake`, `remote`, `soft`, `snapcompact`, then `handoff`. Removed methods
+are never re-enabled. Provider/modality availability and existing failure,
+cancellation, and overflow guards still apply.
+
+- Shake runs only when a read-only preflight estimates enough removable content
+  to leave context at or below 80% of the trigger threshold. It protects recent
+  history, skills, plan references, and artifact recovery reads using the
+  existing shake rules. Insufficient estimates do not rewrite history or bust
+  the prompt cache. A compaction-intercepting extension prevents adaptive shake
+  from bypassing its hook.
+- When shake cannot suffice, provider-native compaction is preferred, followed
+  by a portable text summary. Speculative compaction uses the same summary
+  preference; sufficient shake savings suppress speculative model calls.
+- Image archives are a fallback, not the default for every vision model. They
+  must pass the existing renderability, token-reduction, and frame-payload
+  checks, and additionally fit below the 80% recovery band, including pending
+  input. A rejected archive is not committed.
+- Handoff remains the final permitted fallback; explicit `/handoff` is unchanged.
+
+For a latency-oriented starting point:
+
+```yaml
+compaction:
+  adaptiveEnabled: true
+  thresholdTokens: 200000
+```
+
+Savings are estimates, not guarantees of faster answers or perfect recall.
+The existing post-compaction progress guards remain authoritative. Debug logs
+record adaptive shake's estimated savings, target, and eligible region count
+without recording their content.
+
 ### Shake method
 
 Including `shake` in `compaction.methodOrder` performs an inline, local reduction instead of calling a summarization model. It replaces eligible tool results and large fenced/XML blocks with recoverable `artifact://` references, using a protected recent-token window and minimum-savings threshold. Automatic shake emits the normal auto-compaction events with `action: "shake"`.
@@ -477,6 +517,7 @@ From `settings-schema.ts`:
 - `compaction.enabled` = `true`
 - `compaction.experimentalContextManagement` = `false`. Opt-in persistent notes, branch-bound raw-history retrieval, and local context-window rollover; restart after enabling to refresh available tools.
 - `compaction.methodOrder` = `["remote", "snapcompact", "handoff", "shake", "soft"]`. `remote` uses provider-native server compaction (OpenAI Responses compact, Anthropic compaction beta) when available; unavailable or failed methods advance to the next preference.
+- `compaction.adaptiveEnabled` = `false`. Opt-in history-aware shake gating and summary-first automatic selection among permitted methods; see [Adaptive method selection](#adaptive-method-selection).
 - `compaction.asyncEnabled` = `true`. Async (speculative) compaction: when context enters the pre-threshold band `[threshold − lead, threshold)` (lead = `clamp(threshold × 0.125, 8192, 32000)`), maintenance starts a background summarization for the first configured LLM-backed method (`remote`, `handoff`, or `soft`) off a branch snapshot, isolated from the live turn by a side session id. The armed result is committed instantly when the threshold is actually crossed, hiding summarization latency; post-snapshot turns are appended after the summary unchanged. Armed results are discarded when the branch prefix changes (new compaction, reset boundary, `/tree` navigation), when a provider-native replay payload is no longer readable by the active model, or when context grows past `keepRecentTokens` since compute (a fresh speculation replaces it). Speculation is skipped while an extension registers `session_before_compact`. The status line pulses the auto-compact icon while a speculation runs and holds it in accent when a result is armed.
 - `compaction.reserveTokens` is unset by default. The compaction layer normally applies a `16384`-token floor and at least 15% of the context window; on small windows where that default would be impractical, budget checks use the 15% proportional reserve. An explicit configured reserve is honored.
 - `compaction.keepRecentTokens` = `20000`

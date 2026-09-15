@@ -74,6 +74,7 @@ import {
 	type CompactionMethod,
 	canUseRemoteCompaction,
 	DEFAULT_COMPACTION_METHOD_ORDER,
+	resolveAutoCompactionMethodOrder,
 	resolveCompactionMethodOrder,
 	resolveMethodSettings,
 	resolveSpeculationMethod,
@@ -1595,6 +1596,52 @@ export class SessionMaintenance {
 		return result;
 	}
 
+	/** No writes or provider calls: reject a shake that cannot reach the recovery band. */
+	#adaptiveShakeCanRecover(contextTokens: number): boolean {
+		const settings = this.#host.settings.getGroup("compaction");
+		const contextWindow = this.#model?.contextWindow ?? 0;
+		if (
+			!settings.adaptiveEnabled ||
+			!settings.methodOrder.includes("shake") ||
+			contextWindow <= 0 ||
+			!Number.isFinite(contextTokens) ||
+			this.#host.extensionRunner?.hasHandlers("session_before_compact")
+		) {
+			return false;
+		}
+		const entries = this.#host.sessionManager.getBranch();
+		const latest = getLatestCompactionEntry(entries);
+		let visibleEntries = entries;
+		let keepBoundaryId = latest?.firstKeptEntryId;
+		if (latest && getOpenAiRemoteCompactionPayload(latest)) {
+			// Match buildSessionContext: a speculative native payload covers
+			// only its snapshot, not the visible tail written before commit.
+			const compactionIndex = entries.lastIndexOf(latest);
+			const replayThroughIndex = latest.providerReplayThroughEntryId
+				? entries.findIndex(entry => entry.id === latest.providerReplayThroughEntryId)
+				: -1;
+			const hiddenThrough =
+				replayThroughIndex >= 0 && replayThroughIndex < compactionIndex ? replayThroughIndex : compactionIndex;
+			visibleEntries = entries.slice(hiddenThrough + 1);
+			keepBoundaryId = undefined;
+		}
+		const regions = collectShakeRegions(
+			visibleEntries,
+			this.#tokenizer,
+			this.#withPlanProtection({
+				...DEFAULT_SHAKE_CONFIG,
+				keepBoundaryId,
+			}),
+		);
+		let savings = 0;
+		// ponytail: conservative 64-token recovery-link allowance per region;
+		// the existing post-shake guard checks actual savings before continuing.
+		for (const region of regions) savings += Math.max(0, region.tokens - 64);
+		const target = Math.floor(resolveThresholdTokens(contextWindow, settings) * COMPACTION_RECOVERY_BAND);
+		logger.debug("Adaptive compaction shake preflight", { contextTokens, savings, target, regions: regions.length });
+		return savings > 0 && contextTokens - savings <= target;
+	}
+
 	/**
 	 * Start a background speculative compaction when context has entered the
 	 * pre-threshold band `[threshold − lead, threshold)`. The produced summary
@@ -1621,6 +1668,10 @@ export class SessionMaintenance {
 		const thresholdTokens = resolveThresholdTokens(contextWindow, settings);
 		if (contextTokens >= thresholdTokens) return; // real maintenance owns it now
 		if (thresholdTokens - contextTokens > resolveSpeculationLeadTokens(thresholdTokens)) return;
+		if (this.#adaptiveShakeCanRecover(thresholdTokens)) {
+			this.cancelSpeculation();
+			return;
+		}
 		const current = this.#speculation;
 		if (current) {
 			if (!current.armed) return; // one run at a time
@@ -1680,6 +1731,10 @@ export class SessionMaintenance {
 		if (this.#host.extensionRunner?.hasHandlers("session_before_compact")) return false;
 		const model = this.#model;
 		if (!model) return false;
+		if (this.#adaptiveShakeCanRecover(contextTokens)) {
+			this.cancelSpeculation();
+			return false;
+		}
 		const method = resolveSpeculationMethod(model, settings);
 		if (!method) return false;
 		const thresholdTokens = resolveThresholdTokens(contextWindow, settings);
@@ -3449,7 +3504,7 @@ export class SessionMaintenance {
 		// were being persisted), drop the stale request rather than fall through
 		// to ordinary summary compaction: no summary-provider request was agreed.
 		if (explicitNewContextRequest) return COMPACTION_CHECK_NONE;
-		const methods = resolveCompactionMethodOrder(compactionSettings.methodOrder);
+		const methods = resolveAutoCompactionMethodOrder(compactionSettings);
 		if (methods.length === 0) return COMPACTION_CHECK_NONE;
 		const generation = this.#host.promptGeneration();
 		const terminalTextAnswer =
@@ -3462,6 +3517,13 @@ export class SessionMaintenance {
 		let method: CompactionMethod | undefined;
 		for (let index = startIndex; index < methods.length; index++) {
 			const candidate = methods[index];
+			if (
+				compactionSettings.adaptiveEnabled &&
+				candidate === "shake" &&
+				!this.#adaptiveShakeCanRecover(options.triggerContextTokens ?? this.#estimateStoredContextTokens())
+			) {
+				continue;
+			}
 			const available =
 				candidate === "remote"
 					? canUseRemoteCompaction(this.#model, resolveMethodSettings(compactionSettings, candidate))
@@ -3485,7 +3547,11 @@ export class SessionMaintenance {
 		// Snapcompact is local and instant, so an armed LLM summary (possible
 		// only when settings/model changed since arming) never overrides it.
 		const claimedSpec = this.#claimArmedSpeculation();
-		const armedSpec = method === "snapcompact" ? undefined : claimedSpec;
+		const armedSpec =
+			method === "snapcompact" ||
+			(compactionSettings.adaptiveEnabled && (method === "shake" || claimedSpec?.method !== method))
+				? undefined
+				: claimedSpec;
 
 		const effectiveSettings = resolveMethodSettings(compactionSettings, method);
 		const fallbackFromShake = options.fallbackFromShake === true;
@@ -3926,10 +3992,19 @@ export class SessionMaintenance {
 						}
 						if (snapcompactResult) {
 							const ctxWindow = this.#model?.contextWindow ?? 0;
-							const budget =
+							const windowBudget =
 								ctxWindow > 0
 									? ctxWindow - effectiveReserveTokens(ctxWindow, effectiveSettings)
 									: Number.POSITIVE_INFINITY;
+							const budget =
+								compactionSettings.adaptiveEnabled && ctxWindow > 0
+									? Math.min(
+											windowBudget,
+											Math.floor(
+												resolveThresholdTokens(ctxWindow, effectiveSettings) * COMPACTION_RECOVERY_BAND,
+											) - (options.pendingContextTokens ?? 0),
+										)
+									: windowBudget;
 							const projected = this.#projectSnapcompactContextTokens(preparation, snapcompactResult);
 							// Reduction check in the encrypted-reasoning-excluded domain so opaque
 							// replay signatures cannot inflate the removable baseline (#10716);

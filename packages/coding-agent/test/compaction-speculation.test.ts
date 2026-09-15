@@ -62,6 +62,7 @@ describe("async speculative compaction", () => {
 	function createMaintenance(
 		options: {
 			asyncEnabled?: boolean;
+			adaptiveEnabled?: boolean;
 			methodOrder?: CompactionMethod[];
 			experimental?: boolean;
 			recoveryTools?: boolean;
@@ -76,6 +77,7 @@ describe("async speculative compaction", () => {
 		const settings = Settings.isolated({
 			"compaction.enabled": true,
 			"compaction.asyncEnabled": options.asyncEnabled ?? true,
+			"compaction.adaptiveEnabled": options.adaptiveEnabled ?? false,
 			"compaction.methodOrder": options.methodOrder ?? ["soft"],
 			"compaction.thresholdPercent": 50,
 			"compaction.keepRecentTokens": 1,
@@ -136,7 +138,7 @@ describe("async speculative compaction", () => {
 			recordAnchoredHistoryRewrite: () => {},
 			getContextBreakdown: () => undefined,
 			getContextUsage: () => undefined,
-			shake: async () => ({ modified: false, tokensRemoved: 0 }),
+			shake: (...args: Parameters<SessionMaintenance["shake"]>) => maintenance.shake(...args),
 			dropImages: async () => ({ removed: 0 }),
 			generateHandoffDocument: async () => undefined,
 			removeAssistantMessageFromActiveContext: () => {},
@@ -183,6 +185,163 @@ describe("async speculative compaction", () => {
 
 	afterAll(() => {
 		authStorage.close();
+	});
+
+	it("shakes sufficient recoverable output without starting a speculative provider call", async () => {
+		sessionManager = SessionManager.inMemory();
+		sessionManager.appendMessage(userMessage("Keep the user's acceptance criteria."));
+		const toolMessage = {
+			...assistantMessage("", model),
+			content: [{ type: "toolCall" as const, id: "read-old", name: "read", arguments: { path: "old.txt" } }],
+			stopReason: "toolUse" as const,
+		};
+		sessionManager.appendMessage(toolMessage);
+		sessionManager.appendMessage({
+			role: "toolResult",
+			toolCallId: "read-old",
+			toolName: "read",
+			content: [{ type: "text", text: "old output ".repeat(30_000) }],
+			isError: false,
+			timestamp: Date.now(),
+		});
+		sessionManager.appendMessage(userMessage("recent context ".repeat(10_000)));
+		maintenance = createMaintenance({ adaptiveEnabled: true, methodOrder: ["soft", "shake"] });
+		const compactSpy = vi
+			.spyOn(compactionModule, "compact")
+			.mockRejectedValue(new Error("Unnecessary provider call"));
+		maintenance.maybeStartSpeculativeCompaction(SPECULATION_BAND_START, CONTEXT_WINDOW);
+		expect(maintenance.speculationState).toBe("idle");
+		expect(maintenance.deferThresholdCompactionToSpeculation(THRESHOLD, CONTEXT_WINDOW)).toBe(false);
+
+		const result = await maintenance.runAutoCompaction("threshold", false, false, false, {
+			triggerContextTokens: THRESHOLD,
+		});
+		expect(result.historyRewritten).toBe(true);
+		expect(compactSpy).not.toHaveBeenCalled();
+		const messages = sessionManager.buildSessionContext().messages;
+		expect(messages[0]).toMatchObject({ content: [{ type: "text", text: "Keep the user's acceptance criteria." }] });
+		expect(messages[2]).toMatchObject({ role: "toolResult", toolCallId: "read-old" });
+		expect(JSON.stringify(messages[2])).not.toContain("old output");
+		expect(messages[3]).toMatchObject({ content: [{ type: "text", text: "recent context ".repeat(10_000) }] });
+	});
+
+	it("does not rewrite history for insufficient shake savings before trying a summary", async () => {
+		sessionManager.appendMessage({
+			...assistantMessage("", model),
+			content: [{ type: "toolCall", id: "small-read", name: "read", arguments: { path: "small.txt" } }],
+			stopReason: "toolUse",
+		});
+		sessionManager.appendMessage({
+			role: "toolResult",
+			toolCallId: "small-read",
+			toolName: "read",
+			content: [{ type: "text", text: "small output ".repeat(2_500) }],
+			isError: false,
+			timestamp: Date.now(),
+		});
+		sessionManager.appendMessage(userMessage("recent context ".repeat(10_000)));
+		maintenance = createMaintenance({ adaptiveEnabled: true, methodOrder: ["shake", "soft"] });
+		const original = JSON.stringify(sessionManager.getBranch());
+		const compactSpy = vi.spyOn(compactionModule, "compact").mockRejectedValue(new Error("Provider offline"));
+		await maintenance.runAutoCompaction("threshold", false, false, false, { triggerContextTokens: 90_000 });
+		expect(compactSpy).toHaveBeenCalled();
+		expect(JSON.stringify(sessionManager.getBranch())).toBe(original);
+	});
+
+	it("speculates the adaptive text fallback instead of disabling speculation for an image-first preference", async () => {
+		maintenance = createMaintenance({
+			adaptiveEnabled: true,
+			methodOrder: ["shake", "snapcompact", "soft"],
+		});
+		const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => ({
+			summary: "Acceptance criteria and pending work retained.",
+			firstKeptEntryId: preparation.firstKeptEntryId,
+			tokensBefore: preparation.tokensBefore,
+			details: {},
+		}));
+		const snapSpy = vi.spyOn(snapcompactModule, "compact");
+		maintenance.maybeStartSpeculativeCompaction(SPECULATION_BAND_START, CONTEXT_WINDOW);
+		await waitForState("armed");
+		await maintenance.runAutoCompaction("threshold", false, false, false, { triggerContextTokens: THRESHOLD });
+		expect(compactSpy).toHaveBeenCalledTimes(1);
+		expect(snapSpy).not.toHaveBeenCalled();
+		expect(sessionManager.getEntries().findLast(entry => entry.type === "compaction")?.method).toBe("soft");
+	});
+
+	it("rejects a reducing image archive that would immediately cross the adaptive threshold again", async () => {
+		maintenance = createMaintenance({ adaptiveEnabled: true, methodOrder: ["snapcompact"] });
+		vi.spyOn(snapcompactModule, "compact").mockImplementation(async preparation => ({
+			summary: "archive ".repeat(45_000),
+			firstKeptEntryId: preparation.firstKeptEntryId,
+			tokensBefore: preparation.tokensBefore,
+		}));
+		await maintenance.runAutoCompaction("threshold", false, false, false, { triggerContextTokens: 90_000 });
+		expect(sessionManager.getEntries().some(entry => entry.type === "compaction")).toBe(false);
+		expect(events).toContain("auto_compaction_end");
+	});
+
+	it("keeps manual image-first selection even when adaptive mode prefers text automatically", async () => {
+		maintenance = createMaintenance({ adaptiveEnabled: true, methodOrder: ["snapcompact", "soft"] });
+		const compactSpy = vi.spyOn(compactionModule, "compact");
+		vi.spyOn(snapcompactModule, "compact").mockImplementation(async preparation => ({
+			summary: "image archive",
+			firstKeptEntryId: preparation.firstKeptEntryId,
+			tokensBefore: preparation.tokensBefore,
+		}));
+		await maintenance.compact();
+		expect(sessionManager.getEntries().findLast(entry => entry.type === "compaction")?.method).toBe("snapcompact");
+		expect(compactSpy).not.toHaveBeenCalled();
+	});
+
+	it("counts native post-snapshot replay tail, but not the hidden native prefix, as shake savings", async () => {
+		for (const replayTail of [false, true]) {
+			sessionManager = SessionManager.inMemory();
+			const snapshotId = sessionManager.appendMessage(userMessage("Preserve all acceptance constraints."));
+			sessionManager.appendMessage({
+				...assistantMessage("", model),
+				content: [{ type: "toolCall", id: "old", name: "read", arguments: { path: "old.txt" } }],
+				stopReason: "toolUse",
+			});
+			sessionManager.appendMessage({
+				role: "toolResult",
+				toolCallId: "old",
+				toolName: "read",
+				content: [{ type: "text", text: "important old output ".repeat(30_000) }],
+				isError: false,
+				timestamp: Date.now(),
+			});
+			sessionManager.appendMessage(userMessage("recent context ".repeat(10_000)));
+			sessionManager.appendCompaction("native", undefined, snapshotId, 90_000, {
+				providerReplayThroughEntryId: replayTail ? snapshotId : undefined,
+				preserveData: {
+					openaiRemoteCompaction: {
+						version: "v2",
+						provider: model.provider,
+						replacementHistory: [{ type: "compaction_summary", summary: "saved constraints" }],
+					},
+				},
+			});
+			sessionManager.appendMessage(userMessage("new question"));
+			sessionManager.appendMessage(assistantMessage("new reply", model));
+			expect(JSON.stringify(sessionManager.buildSessionContext().messages).includes("important old output")).toBe(
+				replayTail,
+			);
+			maintenance = createMaintenance({ adaptiveEnabled: true, methodOrder: ["shake", "soft"] });
+			const original = JSON.stringify(sessionManager.getBranch());
+			const compactSpy = vi.spyOn(compactionModule, "compact").mockRejectedValue(new Error("Provider offline"));
+			const result = await maintenance.runAutoCompaction("threshold", false, false, false, {
+				triggerContextTokens: THRESHOLD,
+			});
+			if (replayTail) {
+				expect(compactSpy).not.toHaveBeenCalled();
+				expect(result.historyRewritten).toBe(true);
+				expect(JSON.stringify(sessionManager.buildSessionContext().messages)).not.toContain("important old output");
+			} else {
+				expect(compactSpy).toHaveBeenCalled();
+				expect(JSON.stringify(sessionManager.getBranch())).toBe(original);
+			}
+			vi.restoreAllMocks();
+		}
 	});
 
 	it("reminds only near threshold once per experimental window, including the first and reset windows", async () => {

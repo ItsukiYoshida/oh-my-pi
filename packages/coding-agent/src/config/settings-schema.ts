@@ -2699,6 +2699,18 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"compaction.adaptiveEnabled": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "context",
+			group: "Compaction",
+			label: "Adaptive Compaction",
+			description:
+				"Select among enabled methods: shake only with enough savings, then server/text summaries before image archives",
+		},
+	},
+
 	"compaction.methodOrder": {
 		type: "array",
 		default: [...DEFAULT_COMPACTION_METHOD_ORDER],
@@ -6377,6 +6389,7 @@ export type Personality = SettingValue<"personality">;
 
 export interface CompactionSettings {
 	enabled: boolean;
+	adaptiveEnabled: boolean;
 	experimentalContextManagement?: boolean;
 	methodOrder: CompactionMethod[];
 	thresholdPercent: number;
