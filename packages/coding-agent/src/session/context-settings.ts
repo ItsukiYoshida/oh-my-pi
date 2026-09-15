@@ -140,6 +140,19 @@ export const cfgCompactionMidTurnEnabled = register({
 	},
 });
 
+export const cfgCompactionAdaptiveEnabled = register({
+	id: "compaction.adaptiveEnabled",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "context",
+		group: "Compaction",
+		label: "Adaptive Compaction",
+		description:
+			"Select among enabled methods: shake only with enough savings, then server/text summaries before image archives",
+	},
+});
+
 export const cfgCompactionMethodOrder = register({
 	id: "compaction.methodOrder",
 	type: "array",
@@ -384,6 +397,7 @@ export const cfgCompactionDropUseless = register({
 /** Every `compaction.*` setting as one memoized snapshot (the configured compaction policy). */
 export const cfgCompaction = combine({
 	enabled: cfgCompactionEnabled,
+	adaptiveEnabled: cfgCompactionAdaptiveEnabled,
 	experimentalContextManagement: cfgCompactionExperimentalContextManagement,
 	methodOrder: cfgCompactionMethodOrder,
 	thresholdPercent: cfgCompactionThresholdPercent,
