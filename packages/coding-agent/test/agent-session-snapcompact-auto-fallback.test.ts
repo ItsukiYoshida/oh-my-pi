@@ -30,6 +30,7 @@ interface HarnessOptions {
 	methodOrder?: readonly CompactionMethod[] | null;
 	retryMaxDelayMs?: number;
 	waitForUsageReset?: boolean;
+	adaptiveEnabled?: boolean;
 }
 
 async function createHarness(modelRegistry: ModelRegistry, options: HarnessOptions): Promise<Harness> {
@@ -51,6 +52,7 @@ async function createHarness(modelRegistry: ModelRegistry, options: HarnessOptio
 		// Assert the blocking threshold pass itself; keep the speculation grace
 		// band from deferring it.
 		"compaction.asyncEnabled": false,
+		"compaction.adaptiveEnabled": options.adaptiveEnabled ?? false,
 		...(options.methodOrder === null ? {} : { "compaction.methodOrder": [...methodOrder] }),
 		// Force a 1-token recent window so the post-turn cut always splits off the
 		// last turn and summarizes the seeded unrenderable history. With the default
@@ -326,6 +328,20 @@ describe("AgentSession auto-snapcompact local-blocker fallback", () => {
 		expect(result.errorMessage).toBeUndefined();
 		expect(compactSpy).toHaveBeenCalledTimes(2);
 		expect(waitSpy).toHaveBeenCalledWith(7_200_000, expect.anything());
+	});
+
+	it("uses a text summary after adaptive native compaction fails, before trying an image archive", async () => {
+		const harness = await createHarness(modelRegistry, {
+			activeModel: { provider: "openai", id: "gpt-5" },
+			methodOrder: null,
+			adaptiveEnabled: true,
+		});
+		session = harness.session;
+		vi.spyOn(compactionModule, "compact").mockRejectedValueOnce(new Error("server compaction unavailable"));
+		harness.triggerThreshold();
+		const result = await harness.awaitCompactionEnd();
+		expect(result.action).toBe("context-full");
+		expect(harness.sessionManager.getBranch().find(entry => entry.type === "compaction")?.method).toBe("soft");
 	});
 
 	it("downgrades to context-full when unsupported glyphs make snapcompact unsafe", async () => {
