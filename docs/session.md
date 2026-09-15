@@ -34,6 +34,32 @@ Does not cover `/tree` UI rendering behavior beyond semantics that affect sessio
 - [`src/session/blob-store.ts`](../packages/coding-agent/src/session/blob-store.ts) — content-addressed blob store
 - [`src/session/history-storage.ts`](../packages/coding-agent/src/session/history-storage.ts) — prompt history (separate subsystem)
 
+## Agent-initiated workspace moves (unofficial fork)
+
+The `move` tool lets a main local session relocate itself without creating
+another implementation agent:
+
+```json
+{"path": "/absolute/path/to/existing/worktree"}
+```
+
+It must be the only, directly invoked tool in the model response. Relative
+paths, nested eval/device calls, batches, subagents, plan mode, ACP client
+sessions, and active vibe mode are rejected. Normal exec-tier tool approval
+still applies. The tool does not create directories or Git worktrees.
+
+The tool records a request; the owning loop applies it at its next safe
+turn boundary, after persisting the tool call and result. The native move
+transaction relocates the journal and artifacts without changing the session
+ID, reloads destination settings/skills/context, and reports `session-move`
+before the next model request. In the TUI it uses the existing BTW move gate
+and display refresh. Cancellation before that boundary discards the request.
+Recoverable failures roll back; unrecoverable workspace failures stop the run.
+
+After a successful result, relative tool paths use the destination. Existing
+history and todos remain part of the same session, and reopening its relocated
+journal retains the destination. Explicit `/move` behavior is unchanged.
+
 ## On-Disk Layout
 
 Default file-session location:
