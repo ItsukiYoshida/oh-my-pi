@@ -63,14 +63,23 @@ function formatWorkspaceDirectories(runtime: SlashCommandRuntime, note?: string)
 	const lines = ["Workspace directories:", `  ${cwd} (working directory)`, ...additional.map(d => `  ${d}`)];
 	return note ? `${note}\n${lines.join("\n")}` : lines.join("\n");
 }
-async function fatalMoveFailure(text: string, runtime: SlashCommandRuntime): Promise<SlashCommandResult> {
+type MoveRuntime = Omit<SlashCommandRuntime, "refreshCommands" | "reloadPlugins"> &
+	Partial<Pick<SlashCommandRuntime, "refreshCommands" | "reloadPlugins">>;
+
+async function fatalMoveFailure(text: string, runtime: MoveRuntime): Promise<SlashCommandResult> {
 	await runtime.output(text);
+	if (runtime.session.isStreaming) {
+		// A tool-loop boundary cannot await disposal of its own active loop.
+		// Fail closed instead of resuming with an inconsistent workspace.
+		void runtime.session.abort({ reason: text });
+		throw new Error(text);
+	}
 	await runtime.session.dispose();
 	return commandConsumed();
 }
 
 /** A move rollback failed: re-align the workspace to wherever the session ended up and report it. */
-async function reportFailedRollback(runtime: SlashCommandRuntime, rollbackError: unknown): Promise<SlashCommandResult> {
+async function reportFailedRollback(runtime: MoveRuntime, rollbackError: unknown): Promise<SlashCommandResult> {
 	const actual = runtime.sessionManager.getCwd();
 	try {
 		await rescopeHeadlessToCwd(runtime, actual);
@@ -92,8 +101,8 @@ async function reportFailedRollback(runtime: SlashCommandRuntime, rollbackError:
  * on failure. Returns a result when the move did not complete; `undefined`
  * on success so the caller can report its own confirmation.
  */
-async function relocateHeadlessSession(
-	runtime: SlashCommandRuntime,
+export async function relocateHeadlessSession(
+	runtime: MoveRuntime,
 	resolvedPath: string,
 ): Promise<SlashCommandResult | undefined> {
 	try {
@@ -889,7 +898,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 		},
 	},
 ];
-async function rescopeHeadlessToCwd(runtime: SlashCommandRuntime, cwd: string): Promise<void> {
+async function rescopeHeadlessToCwd(runtime: MoveRuntime, cwd: string): Promise<void> {
 	setProjectDir(cwd);
 	await runtime.settings.reloadForCwd(cwd);
 	await rebindMemoryBackendForCwd(runtime.session);
@@ -899,5 +908,5 @@ async function rescopeHeadlessToCwd(runtime: SlashCommandRuntime, cwd: string): 
 	runtime.session.setTitleSystemPrompt(p);
 	await runtime.session.refreshSkillsAndCommands();
 	await runtime.refreshCommands?.();
-	await runtime.reloadPlugins();
+	await runtime.reloadPlugins?.();
 }

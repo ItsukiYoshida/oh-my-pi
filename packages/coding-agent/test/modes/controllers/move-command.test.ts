@@ -255,6 +255,22 @@ describe("CommandController /move", () => {
 			await fs.rm(targetDir, { recursive: true, force: true });
 		}
 	});
+	it("unwinds an agent move before awaiting shutdown of its own active loop", async () => {
+		const { ctx, shutdown, rollbackMove } = createMoveContext("/source");
+		const stopped = Promise.withResolvers<void>();
+		Object.defineProperty(ctx.session, "isStreaming", { value: true });
+		ctx.session.abort = vi.fn(() => stopped.promise);
+		ctx.applyCwdChange = vi.fn(async () => false);
+		rollbackMove.mockRejectedValueOnce(new Error("rollback denied"));
+		shutdown.mockImplementation(() => stopped.promise);
+		try {
+			expect(await new CommandController(ctx).handleAgentMove("/target")).toBe(false);
+			expect(ctx.session.abort).toHaveBeenCalled();
+			expect(shutdown).toHaveBeenCalled();
+		} finally {
+			stopped.resolve();
+		}
+	});
 	it("stops recovery after aligning with the moved session", async () => {
 		const sourceDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-move-source-"));
 		const targetDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-move-target-"));

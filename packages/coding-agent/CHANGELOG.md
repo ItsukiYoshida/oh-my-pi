@@ -3037,6 +3037,7 @@ Older entries are archived in [packages/coding-agent/CHANGELOG.md@1e3cc3ab94d0](
 ### Added
 
 - Added opt-in adaptive auto-compaction that avoids insufficient shake rewrites, prefers native/text summaries, and rejects image archives without enough context headroom.
+- Added a main-session `move` tool that relocates the same conversation to an existing worktree at a safe tool-loop boundary, reusing native move and rollback behavior.
 
 ## [18.2.0] - 2026-09-15
 

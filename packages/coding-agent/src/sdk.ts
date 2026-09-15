@@ -2559,6 +2559,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			get costGate() {
 				return currentCostGate();
 			},
+			requestSessionMove: (id, target, signal) => session.requestSessionMove(id, target, signal),
 			isToolActive: name => activeToolNames.has(name),
 			setActiveToolNames,
 			toolRegistry,

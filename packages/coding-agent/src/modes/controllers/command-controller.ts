@@ -303,6 +303,17 @@ export class CommandController {
 		this.showCommandReport({ title, body: new Markdown(markdown.trim(), 0, 0, getMarkdownTheme()) });
 	}
 
+	async #shutdownAfterMoveFailure(): Promise<void> {
+		if (this.ctx.session.isStreaming) {
+			// A model-requested move owns the active tool-loop boundary.
+			// Abort now, but let that loop unwind before shutdown awaits it.
+			void this.ctx.session.abort({ reason: "Workspace move could not restore a consistent state." });
+			void this.ctx.shutdown();
+			return;
+		}
+		await this.ctx.shutdown();
+	}
+
 	async #restoreAfterMoveFailure(
 		previousState: Parameters<InteractiveModeContext["sessionManager"]["rollbackMove"]>[0],
 		initialError?: unknown,
@@ -325,7 +336,7 @@ export class CommandController {
 				this.ctx.showError(
 					`Failed to roll back move: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)} (failed to re-align workspace to ${actual})`,
 				);
-				await this.ctx.shutdown();
+				await this.#shutdownAfterMoveFailure();
 				return;
 			}
 			this.ctx.showError(
@@ -347,7 +358,7 @@ export class CommandController {
 		} catch {}
 		if (!realigned) {
 			this.ctx.showError(`Failed to restore source workspace after rollback: workspace remains at ${actual}`);
-			await this.ctx.shutdown();
+			await this.#shutdownAfterMoveFailure();
 			return;
 		}
 		this.ctx.showError(`Failed to restore source workspace after rollback: workspace remains at ${actual}`);
@@ -1730,6 +1741,11 @@ export class CommandController {
 				new Text(`${theme.fg("accent", `${theme.status.success} Moved to ${resolvedPath}`)}`, 1, 1),
 			]);
 		}
+	}
+
+	/** Called only after the model's sole move call has completed and been persisted. */
+	async handleAgentMove(targetPath: string): Promise<boolean> {
+		return this.#withSessionMove(() => this.#relocateSession(targetPath));
 	}
 
 	/**

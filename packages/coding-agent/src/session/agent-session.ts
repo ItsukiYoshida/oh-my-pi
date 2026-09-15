@@ -240,6 +240,7 @@ import type { ImageAttachmentEntry, ToolSession } from "../tools";
 import { resolveApproval } from "../tools/approval";
 import { type AskToolDetails } from "@oh-my-pi/pi-tui/tools/ask";
 import { type AskToolInput, recoverAskQuestions } from "../tools/ask";
+import { relocateHeadlessSession } from "../slash-commands/builtin-lifecycle";
 import {
 	armIdleCloseForOwner,
 	cancelIdleCloseForOwner,
@@ -1117,6 +1118,8 @@ export class AgentSession implements SettingsScope {
 	// Agent identity (registry id) used for IRC routing and job ownership.
 	#agentId: string | undefined;
 	#agentKind: "main" | "sub" = "main";
+	#pendingSessionMove?: { toolCallId: string; cwd: string; sessionId: string; generation: number };
+	#agentMoveHandler?: (cwd: string) => Promise<boolean>;
 	#scoutAllowedBySpawnPolicy = true;
 	#providerSessionId: string | undefined;
 	#freshProviderSessionId: string | undefined;
@@ -2297,6 +2300,8 @@ export class AgentSession implements SettingsScope {
 		this.agent.setProviderResponseInterceptor(this.#onResponse);
 		this.agent.setRawSseEventInterceptor(this.#onSseEvent);
 		this.agent.setOnTurnEnd(async (messages, signal, context) => {
+			if (signal?.aborted) return;
+			await this.#applyRequestedSessionMove(context, signal);
 			if (signal?.aborted) return;
 			const rewindReport = this.#extractRewindReport(messages);
 			if (rewindReport) {
@@ -11671,6 +11676,82 @@ export class AgentSession implements SettingsScope {
 	async moveSession(newCwd: string, targetSessionDir?: string): Promise<void> {
 		this.#assertVibeSessionTransitionAllowed("move the session");
 		await this.sessionManager.moveTo(newCwd, targetSessionDir);
+	}
+
+	/** UI hosts supply their existing move transaction, including the BTW gate. */
+	setAgentMoveHandler(handler: (cwd: string) => Promise<boolean>): void {
+		this.#agentMoveHandler = handler;
+	}
+
+	/** Only a sole, direct move tool may request a workspace transition. */
+	async requestSessionMove(toolCallId: string, cwd: string, signal?: AbortSignal): Promise<void> {
+		this.#assertVibeSessionTransitionAllowed("move the session");
+		if (this.#agentKind !== "main" || this.#clientBridge || this.#isDisposed || this.#planModeState?.enabled) {
+			throw new ToolError("Session move is unavailable in this session mode.");
+		}
+		const assistant = this.agent.state.messages.findLast(message => message.role === "assistant");
+		const calls = assistant?.role === "assistant" ? assistant.content.filter(block => block.type === "toolCall") : [];
+		if (calls.length !== 1 || calls[0].name !== "move" || calls[0].id !== toolCallId) {
+			throw new ToolError("Call move directly as the only tool call in the response, not through eval or a batch.");
+		}
+		if (typeof cwd !== "string" || !path.isAbsolute(cwd))
+			throw new ToolError("move requires an absolute directory path.");
+		if (!(await fs.promises.stat(cwd)).isDirectory()) throw new ToolError(`Not a directory: ${cwd}`);
+		if (signal?.aborted) throw signal.reason ?? new Error("Move cancelled");
+		this.#pendingSessionMove = {
+			toolCallId,
+			cwd: path.resolve(cwd),
+			sessionId: this.sessionId,
+			generation: this.#promptGeneration,
+		};
+	}
+
+	async #applyRequestedSessionMove(context: AgentTurnEndContext | undefined, signal?: AbortSignal): Promise<void> {
+		const request = this.#pendingSessionMove;
+		this.#pendingSessionMove = undefined;
+		if (
+			!request ||
+			signal?.aborted ||
+			request.sessionId !== this.sessionId ||
+			request.generation !== this.#promptGeneration ||
+			!context?.toolResults.some(result => result.toolCallId === request.toolCallId && !result.isError)
+		)
+			return;
+		if (!(await this.#persistTurnMessagesForMidRunCompaction(context)) || signal?.aborted) return;
+		let message: string;
+		try {
+			if (!(await fs.promises.stat(request.cwd)).isDirectory()) throw new Error(`Not a directory: ${request.cwd}`);
+			if (request.cwd !== path.resolve(this.sessionManager.getCwd())) {
+				if (this.#agentMoveHandler) {
+					if (!(await this.#agentMoveHandler(request.cwd)))
+						throw new Error("Native move was rejected or rolled back.");
+				} else {
+					let failureMessage = "";
+					const failure = await relocateHeadlessSession(
+						{
+							session: this,
+							sessionManager: this.sessionManager,
+							settings: this.settings,
+							cwd: this.sessionManager.getCwd(),
+							output: text => {
+								failureMessage = text;
+								this.emitNotice("error", text, "session-move");
+							},
+						},
+						request.cwd,
+					);
+					if (failure) throw new Error(failureMessage);
+				}
+			}
+			message = `Session moved to ${this.sessionManager.getCwd()}. Session ID unchanged: ${this.sessionId}.`;
+		} catch (error) {
+			message = `Session move failed: ${error instanceof Error ? error.message : String(error)}. Current session directory: ${this.sessionManager.getCwd()}.`;
+		}
+		if (this.#isDisposed || signal?.aborted) return;
+		await this.sendCustomMessage(
+			{ customType: "session-move", content: message, display: true },
+			{ deliverAs: "aside" },
+		);
 	}
 
 	// =========================================================================

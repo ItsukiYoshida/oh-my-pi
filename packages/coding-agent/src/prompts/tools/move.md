@@ -1,0 +1,3 @@
+Move this same session to an existing local working directory, including a dedicated worktree. Keeps the session ID, conversation, todos, and artifacts; reloads destination workspace settings and context through the native move path. Does not create a worktree or launch another agent.
+
+Call `move` directly, as the only tool call in the response. Do not invoke through eval, another tool, or a parallel batch. Supply an absolute directory path. The request is applied after its tool result has been saved, before the next model request. Wait for the session-move result before using relative paths. A rejected or failed move does not authorize assuming the destination is active. Directory access remains subject to normal tool approval and session transition restrictions.
