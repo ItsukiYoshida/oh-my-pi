@@ -72,6 +72,7 @@ import { MemoryEditTool } from "./memory-edit";
 import { MemoryRecallTool } from "./memory-recall";
 import { MemoryReflectTool } from "./memory-reflect";
 import { MemoryRetainTool } from "./memory-retain";
+import { MoveTool } from "./move";
 import { wrapToolWithMetaNotice } from "./output-meta";
 import { ReadTool } from "./read";
 import { type PlanProposalHandler, specialToolCommands } from "./resolve";
@@ -234,6 +235,8 @@ export interface ToolSession {
 	[DSM_REFERENCES]?: DsmReferenceOwner;
 	/** Cost gate of the session tree, forwarded to subagents. */
 	costGate?: CostGateApi;
+	/** Queue a same-session move for the next safe tool-loop boundary. */
+	requestSessionMove?: (toolCallId: string, cwd: string, signal?: AbortSignal) => Promise<void>;
 	/** Additional workspace directories beyond cwd (multi-root), forwarded to subagents. */
 	additionalDirectories?: string[];
 	/** Whether UI is available */
@@ -632,6 +635,7 @@ export const BUILTIN_TOOLS: Record<BuiltinToolName, ToolFactory> = {
 	rewind: RewindTool.createIf,
 	context_notes: ContextNotesTool.createIf,
 	new_context: NewContextTool.createIf,
+	move: MoveTool.createIf,
 	task: s => TaskTool.create(s),
 	wait: s => new WaitTool(s),
 	todo: s => new TodoTool(s),
