@@ -233,7 +233,9 @@ describe("async speculative compaction", () => {
 		expect(maintenance.speculationState).toBe("idle");
 		expect(maintenance.deferThresholdCompactionToSpeculation(THRESHOLD, CONTEXT_WINDOW)).toBe(false);
 
-		const result = await maintenance.runAutoCompaction("threshold", false, false, false, {
+		const result = await maintenance.runAutoCompaction("threshold", false, {
+			autoContinue: false,
+			suppressContinuation: false,
 			triggerContextTokens: THRESHOLD,
 		});
 		expect(result.historyRewritten).toBe(true);
@@ -263,7 +265,11 @@ describe("async speculative compaction", () => {
 		maintenance = createMaintenance({ adaptiveEnabled: true, methodOrder: ["shake", "soft"] });
 		const original = JSON.stringify(sessionManager.getBranch());
 		const compactSpy = vi.spyOn(compactionModule, "compact").mockRejectedValue(new Error("Provider offline"));
-		await maintenance.runAutoCompaction("threshold", false, false, false, { triggerContextTokens: 90_000 });
+		await maintenance.runAutoCompaction("threshold", false, {
+			autoContinue: false,
+			suppressContinuation: false,
+			triggerContextTokens: 90_000,
+		});
 		expect(compactSpy).toHaveBeenCalled();
 		expect(JSON.stringify(sessionManager.getBranch())).toBe(original);
 	});
@@ -282,7 +288,11 @@ describe("async speculative compaction", () => {
 		const snapSpy = vi.spyOn(snapcompactModule, "compact");
 		maintenance.maybeStartSpeculativeCompaction(SPECULATION_BAND_START, CONTEXT_WINDOW);
 		await waitForState("armed");
-		await maintenance.runAutoCompaction("threshold", false, false, false, { triggerContextTokens: THRESHOLD });
+		await maintenance.runAutoCompaction("threshold", false, {
+			autoContinue: false,
+			suppressContinuation: false,
+			triggerContextTokens: THRESHOLD,
+		});
 		expect(compactSpy).toHaveBeenCalledTimes(1);
 		expect(snapSpy).not.toHaveBeenCalled();
 		expect(sessionManager.getEntries().findLast(entry => entry.type === "compaction")?.method).toBe("soft");
@@ -295,7 +305,11 @@ describe("async speculative compaction", () => {
 			firstKeptEntryId: preparation.firstKeptEntryId,
 			tokensBefore: preparation.tokensBefore,
 		}));
-		await maintenance.runAutoCompaction("threshold", false, false, false, { triggerContextTokens: 90_000 });
+		await maintenance.runAutoCompaction("threshold", false, {
+			autoContinue: false,
+			suppressContinuation: false,
+			triggerContextTokens: 90_000,
+		});
 		expect(sessionManager.getEntries().some(entry => entry.type === "compaction")).toBe(false);
 		expect(events).toContain("auto_compaction_end");
 	});
@@ -349,7 +363,9 @@ describe("async speculative compaction", () => {
 			maintenance = createMaintenance({ adaptiveEnabled: true, methodOrder: ["shake", "soft"] });
 			const original = JSON.stringify(sessionManager.getBranch());
 			const compactSpy = vi.spyOn(compactionModule, "compact").mockRejectedValue(new Error("Provider offline"));
-			const result = await maintenance.runAutoCompaction("threshold", false, false, false, {
+			const result = await maintenance.runAutoCompaction("threshold", false, {
+				autoContinue: false,
+				suppressContinuation: false,
 				triggerContextTokens: THRESHOLD,
 			});
 			if (replayTail) {
