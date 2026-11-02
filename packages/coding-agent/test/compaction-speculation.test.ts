@@ -72,6 +72,7 @@ describe("async speculative compaction", () => {
 			asyncEnabled?: boolean;
 			adaptiveEnabled?: boolean;
 			methodOrder?: CompactionMethod[];
+			modelThresholds?: Record<string, string>;
 			experimental?: boolean;
 			recoveryTools?: boolean;
 			obfuscateTextForProvider?: (text: string | undefined) => string | undefined;
@@ -94,6 +95,7 @@ describe("async speculative compaction", () => {
 			"compaction.adaptiveEnabled": options.adaptiveEnabled ?? false,
 			"compaction.methodOrder": options.methodOrder ?? ["soft"],
 			"compaction.thresholdPercent": 50,
+			"compaction.modelThresholds": options.modelThresholds ?? {},
 			"compaction.keepRecentTokens": 1,
 			"compaction.autoContinue": false,
 			"compaction.experimentalContextManagement": options.experimental ?? false,
@@ -244,32 +246,39 @@ describe("async speculative compaction", () => {
 		expect(messages[3]).toMatchObject({ content: [{ type: "text", text: "recent context ".repeat(10_000) }] });
 	});
 
-	it("does not rewrite history for insufficient shake savings before trying a summary", async () => {
-		sessionManager.appendMessage({
-			...assistantMessage("", model),
-			content: [{ type: "toolCall", id: "small-read", name: "read", arguments: { path: "small.txt" } }],
-			stopReason: "toolUse",
-		});
-		sessionManager.appendMessage({
-			role: "toolResult",
-			toolCallId: "small-read",
-			toolName: "read",
-			content: [{ type: "text", text: "small output ".repeat(2_500) }],
-			isError: false,
-			timestamp: Date.now(),
-		});
-		sessionManager.appendMessage(userMessage("recent context ".repeat(10_000)));
-		maintenance = createMaintenance({ adaptiveEnabled: true, methodOrder: ["shake", "soft"] });
-		const original = JSON.stringify(sessionManager.getBranch());
-		const compactSpy = vi.spyOn(compactionModule, "compact").mockRejectedValue(new Error("Provider offline"));
-		await maintenance.runAutoCompaction("threshold", false, {
-			autoContinue: false,
-			suppressContinuation: false,
-			triggerContextTokens: 90_000,
-		});
-		expect(compactSpy).toHaveBeenCalled();
-		expect(JSON.stringify(sessionManager.getBranch())).toBe(original);
-	});
+	it.each(["global", "model"] as const)(
+		"does not rewrite history when shake cannot recover below the %s threshold",
+		async threshold => {
+			sessionManager.appendMessage({
+				...assistantMessage("", model),
+				content: [{ type: "toolCall", id: "small-read", name: "read", arguments: { path: "small.txt" } }],
+				stopReason: "toolUse",
+			});
+			sessionManager.appendMessage({
+				role: "toolResult",
+				toolCallId: "small-read",
+				toolName: "read",
+				content: [{ type: "text", text: "small output ".repeat(2_500) }],
+				isError: false,
+				timestamp: Date.now(),
+			});
+			sessionManager.appendMessage(userMessage("recent context ".repeat(10_000)));
+			maintenance = createMaintenance({
+				adaptiveEnabled: true,
+				methodOrder: ["shake", "soft"],
+				modelThresholds: threshold === "model" ? { [`${model.provider}/${model.id}`]: "f20000" } : undefined,
+			});
+			const original = JSON.stringify(sessionManager.getBranch());
+			const compactSpy = vi.spyOn(compactionModule, "compact").mockRejectedValue(new Error("Provider offline"));
+			await maintenance.runAutoCompaction("threshold", false, {
+				autoContinue: false,
+				suppressContinuation: false,
+				triggerContextTokens: threshold === "model" ? 25_000 : 90_000,
+			});
+			expect(compactSpy).toHaveBeenCalled();
+			expect(JSON.stringify(sessionManager.getBranch())).toBe(original);
+		},
+	);
 
 	it("speculates the adaptive text fallback instead of disabling speculation for an image-first preference", async () => {
 		maintenance = createMaintenance({

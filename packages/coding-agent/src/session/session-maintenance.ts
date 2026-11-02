@@ -2236,7 +2236,7 @@ export class SessionMaintenance {
 
 	/** No writes or provider calls: reject a shake that cannot reach the recovery band. */
 	#adaptiveShakeCanRecover(contextTokens: number): boolean {
-		const settings = cfgCompaction.get(this.#host.settings);
+		const settings = this.#compactionSettings;
 		const contextWindow = this.#model?.contextWindow ?? 0;
 		if (
 			!settings.adaptiveEnabled ||
