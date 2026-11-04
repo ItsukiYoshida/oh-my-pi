@@ -1,18 +1,13 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { $which, ptree } from "@oh-my-pi/pi-utils";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
-import { ToolAbortError } from "../tools/tool-errors";
-import { FORGE_NON_INTERACTIVE_ENV } from "./forge-cli";
+import { $which } from "@oh-my-pi/pi-utils";
+import { FORGE_NON_INTERACTIVE_ENV, type ForgeCliResult, runForgeCli } from "./forge-cli";
 
 /** Deploy and verify hooks run inside ldev, so the deadline covers a cloud deploy. */
 const LDEV_TIMEOUT_MS = 60 * 60 * 1000;
 
-export interface LdevResult {
-	exitCode: number;
-	stdout: string;
-	stderr: string;
+export interface LdevResult extends ForgeCliResult {
 	/** Directory ldev asked its caller to enter; absent when ldev launched an agent there itself. */
 	worktree?: string;
 }
@@ -52,38 +47,30 @@ export const ldev = {
 	 * own process group so cancelling also stops commands it started (`exec`, deploy hooks).
 	 */
 	async run(cwd: string, rawArgs: readonly string[], signal?: AbortSignal): Promise<LdevResult> {
-		if (!$which("ldev")) throw new ToolError("ldev is not installed or not on PATH.");
 		const args = ldevArgs(rawArgs);
 		const cdFile = path.join(os.tmpdir(), `omp-ldev-cd-${crypto.randomUUID()}`);
 		try {
-			let result: ptree.ExecResult;
-			try {
-				result = await ptree.exec(["ldev", ...args], {
-					cwd,
+			const result = await runForgeCli(
+				{
+					bin: "ldev",
+					displayName: "ldev",
+					installMessage: "ldev is not installed or not on PATH.",
 					env: { ...FORGE_NON_INTERACTIVE_ENV, LDEV_CD_FILE: cdFile },
-					signal,
-					timeout: LDEV_TIMEOUT_MS,
-					allowNonZero: true,
-					detached: true,
-					subreaper: process.platform === "linux",
-				});
-			} catch (error) {
-				if (signal?.aborted) throw new ToolAbortError();
-				if (error instanceof ptree.TimeoutError) throw new ToolError(`ldev timed out: ldev ${args.join(" ")}`);
-				throw error;
-			}
+					timeoutMs: LDEV_TIMEOUT_MS,
+					processGroup: true,
+				},
+				cwd,
+				args,
+				signal,
+				true,
+			);
 			const target = await fs.readFile(cdFile, "utf8").catch(() => "");
 			// `issue resume` and explicit `--agent` hand the worktree to another agent, not this session.
 			const options = ldevOptions(args);
 			const launchedAgent =
 				(args[0] === "issue" && args[1] === "resume") ||
 				options.some(arg => arg === "--agent" || arg.startsWith("--agent="));
-			return {
-				exitCode: result.exitCode ?? 1,
-				stdout: result.stdout.trim(),
-				stderr: result.stderr.trim(),
-				...(target && !launchedAgent ? { worktree: target } : {}),
-			};
+			return target && !launchedAgent ? { ...result, worktree: target } : result;
 		} finally {
 			await fs.rm(cdFile, { force: true });
 		}

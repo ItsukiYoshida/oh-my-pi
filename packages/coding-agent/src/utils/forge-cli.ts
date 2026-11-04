@@ -60,6 +60,11 @@ export interface ForgeCliSpec {
 	installMessage: string;
 	env: Record<string, string | undefined>;
 	timeoutMs: number;
+	/**
+	 * Run in its own process group and signal the whole group on cancel or deadline, for CLIs that
+	 * start long-lived descendants (hooks, wrapped commands). POSIX only.
+	 */
+	processGroup?: boolean;
 }
 
 /** Env shared by every forge CLI: disables git/ssh credential and editor prompts. */
@@ -116,6 +121,7 @@ export async function runForgeCli(
 	if (!$which(spec.bin)) throw new ToolError(spec.installMessage);
 	const timeoutSignal = AbortSignal.timeout(spec.timeoutMs);
 	const combinedSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
+	const processGroup = spec.processGroup === true && process.platform !== "win32";
 	try {
 		const child = Bun.spawn([spec.bin, ...args], {
 			cwd,
@@ -124,8 +130,23 @@ export async function runForgeCli(
 			stdout: "pipe",
 			stderr: "pipe",
 			windowsHide: true,
-			signal: combinedSignal,
+			// Bun's `signal` reaches only the direct child; group mode signals the group itself.
+			...(processGroup ? { detached: true } : { signal: combinedSignal }),
 		});
+		const killGroup = () => {
+			const send = (name: NodeJS.Signals) => {
+				try {
+					process.kill(-child.pid, name);
+				} catch {}
+			};
+			send("SIGTERM");
+			setTimeout(() => send("SIGKILL"), 1000).unref();
+		};
+		if (processGroup) {
+			if (combinedSignal.aborted) killGroup();
+			else combinedSignal.addEventListener("abort", killGroup, { once: true });
+			void child.exited.finally(() => combinedSignal.removeEventListener("abort", killGroup));
+		}
 		if (!(child.stdout instanceof ReadableStream) || !(child.stderr instanceof ReadableStream)) {
 			throw new ToolError(`Failed to capture ${spec.displayName} output.`);
 		}
@@ -135,6 +156,7 @@ export async function runForgeCli(
 			child.exited,
 		]);
 		throwIfAborted(signal);
+		if (processGroup && timeoutSignal.aborted) throw timeoutSignal.reason;
 		return {
 			exitCode: exitCode ?? 0,
 			stdout: trimOutput ? stdout.text.trim() : stdout.text,
