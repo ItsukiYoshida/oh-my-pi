@@ -11,6 +11,7 @@ echo "args: $*"
 case "$1 $2" in
   "issue start"|"issue resume") printf '%s' "$FAKE_WORKTREE" > "$LDEV_CD_FILE" ;;
   "lane status") echo "no binding" >&2; exit 3 ;;
+  "exec --lease") (sleep 1; echo survived > "$FAKE_MARKER") & wait ;;
 esac
 `;
 
@@ -50,6 +51,24 @@ describe("ldev integration", () => {
 
 		const resumed = await ldev.run(dir, ["issue", "resume", "7"]);
 		expect(resumed.worktree).toBeUndefined();
+	});
+
+	it("keeps the injected flag ahead of an argument terminator", async () => {
+		const result = await ldev.run(dir, ["issue", "start", "--no-label", "--", "7"]);
+		expect(result.stdout).toBe("args: issue start --no-label --no-agent -- 7");
+		// Flags after `--` belong to the wrapped command, not to ldev.
+		const exec = await ldev.run(dir, ["issue", "start", "--", "--agent"]);
+		expect(exec.stdout).toBe("args: issue start --no-agent -- --agent");
+		expect(exec.worktree).toBe(path.join(dir, "issue-7"));
+	});
+
+	it("stops commands ldev started when the call is cancelled", async () => {
+		const marker = path.join(dir, "marker");
+		process.env.FAKE_MARKER = marker;
+		await expect(ldev.run(dir, ["exec", "--lease", "--", "true"], AbortSignal.timeout(100))).rejects.toThrow();
+		// Real time on purpose: the grandchild is an OS process writing after 1s, which fake timers cannot drive.
+		await Bun.sleep(1500);
+		expect(await fs.exists(marker)).toBe(false);
 	});
 
 	it("reports ldev failures with their exit code and no worktree", async () => {
