@@ -142,19 +142,27 @@ export async function runForgeCli(
 			send("SIGTERM");
 			setTimeout(() => send("SIGKILL"), 1000).unref();
 		};
+		// Descendants can outlive ldev and keep the pipes open, so cancellation stays armed until the
+		// output is collected, not just until the group leader exits.
 		if (processGroup) {
 			if (combinedSignal.aborted) killGroup();
 			else combinedSignal.addEventListener("abort", killGroup, { once: true });
-			void child.exited.finally(() => combinedSignal.removeEventListener("abort", killGroup));
 		}
-		if (!(child.stdout instanceof ReadableStream) || !(child.stderr instanceof ReadableStream)) {
-			throw new ToolError(`Failed to capture ${spec.displayName} output.`);
+		let stdout: CapturedForgeText;
+		let stderr: CapturedForgeText;
+		let exitCode: number | null;
+		try {
+			if (!(child.stdout instanceof ReadableStream) || !(child.stderr instanceof ReadableStream)) {
+				throw new ToolError(`Failed to capture ${spec.displayName} output.`);
+			}
+			[stdout, stderr, exitCode] = await Promise.all([
+				readCappedText(child.stdout, spec.bin),
+				readCappedText(child.stderr, spec.bin),
+				child.exited,
+			]);
+		} finally {
+			combinedSignal.removeEventListener("abort", killGroup);
 		}
-		const [stdout, stderr, exitCode] = await Promise.all([
-			readCappedText(child.stdout, spec.bin),
-			readCappedText(child.stderr, spec.bin),
-			child.exited,
-		]);
 		throwIfAborted(signal);
 		if (processGroup && timeoutSignal.aborted) throw timeoutSignal.reason;
 		return {

@@ -12,6 +12,7 @@ case "$1 $2" in
   "issue start"|"issue resume") printf '%s' "$FAKE_WORKTREE" > "$LDEV_CD_FILE" ;;
   "lane status") echo "no binding" >&2; exit 3 ;;
   "exec --lease") (sleep 1; echo survived > "$FAKE_MARKER") & wait ;;
+  "exec --") (sleep 1; echo survived > "$FAKE_MARKER") & ;;
 esac
 `;
 
@@ -27,13 +28,15 @@ describe("ldev integration", () => {
 		previousPath = process.env.PATH;
 		process.env.PATH = `${dir}${path.delimiter}${previousPath}`;
 		process.env.FAKE_WORKTREE = path.join(dir, "issue-7");
-		// The runner snapshots the environment at import, so load it after PATH points at the fake.
+		process.env.FAKE_MARKER = path.join(dir, "marker");
+		// The runner snapshots the environment at import, so load it after the fake's variables are set.
 		({ ldev } = await import("@oh-my-pi/pi-coding-agent/utils/ldev"));
 	});
 
 	afterAll(async () => {
 		process.env.PATH = previousPath;
 		delete process.env.FAKE_WORKTREE;
+		delete process.env.FAKE_MARKER;
 		await fs.rm(dir, { recursive: true, force: true });
 	});
 
@@ -64,8 +67,14 @@ describe("ldev integration", () => {
 
 	it("stops commands ldev started when the call is cancelled", async () => {
 		const marker = path.join(dir, "marker");
-		process.env.FAKE_MARKER = marker;
+		// Uncancelled, the background child does write the marker: the probe below is not vacuous.
+		await ldev.run(dir, ["exec", "--", "true"]);
+		expect(await fs.exists(marker)).toBe(true);
+		await fs.rm(marker);
+
 		await expect(ldev.run(dir, ["exec", "--lease", "--", "true"], AbortSignal.timeout(100))).rejects.toThrow();
+		// ldev itself exits while its background child still holds the output pipes.
+		await expect(ldev.run(dir, ["exec", "--", "true"], AbortSignal.timeout(100))).rejects.toThrow();
 		// Real time on purpose: the grandchild is an OS process writing after 1s, which fake timers cannot drive.
 		await Bun.sleep(1500);
 		expect(await fs.exists(marker)).toBe(false);
