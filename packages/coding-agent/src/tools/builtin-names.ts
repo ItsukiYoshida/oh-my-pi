@@ -13,6 +13,7 @@ export const BUILTIN_TOOL_NAMES = [
 	"grep",
 	"find",
 	"lsp",
+	"ldev",
 	"checkpoint",
 	"rewind",
 	"context_notes",
