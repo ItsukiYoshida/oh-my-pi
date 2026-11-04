@@ -133,14 +133,27 @@ export async function runForgeCli(
 			// Bun's `signal` reaches only the direct child; group mode signals the group itself.
 			...(processGroup ? { detached: true } : { signal: combinedSignal }),
 		});
+		// Settles once no group member is left, so a cancelled call never returns while a descendant
+		// that ignored SIGTERM (and already closed its stdio) is still running.
+		let terminating: Promise<void> | undefined;
 		const killGroup = () => {
-			const send = (name: NodeJS.Signals) => {
-				try {
-					process.kill(-child.pid, name);
-				} catch {}
-			};
-			send("SIGTERM");
-			setTimeout(() => send("SIGKILL"), 1000).unref();
+			terminating ??= (async () => {
+				const send = (name: NodeJS.Signals | 0) => {
+					try {
+						process.kill(-child.pid, name);
+						return true;
+					} catch {
+						return false;
+					}
+				};
+				const waitGone = async (ms: number) => {
+					for (let waited = 0; waited < ms && send(0); waited += 50) await Bun.sleep(50);
+				};
+				send("SIGTERM");
+				await waitGone(1000);
+				// SIGKILL'd members still need their parent (or init) to reap them.
+				if (send("SIGKILL")) await waitGone(1000);
+			})();
 		};
 		// Descendants can outlive ldev and keep the pipes open, so cancellation stays armed until the
 		// output is collected, not just until the group leader exits.
@@ -163,6 +176,7 @@ export async function runForgeCli(
 		} finally {
 			combinedSignal.removeEventListener("abort", killGroup);
 		}
+		await terminating;
 		throwIfAborted(signal);
 		if (processGroup && timeoutSignal.aborted) throw timeoutSignal.reason;
 		return {

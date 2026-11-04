@@ -13,6 +13,7 @@ case "$1 $2" in
   "lane status") echo "no binding" >&2; exit 3 ;;
   "exec --lease") (sleep 1; echo survived > "$FAKE_MARKER") & wait ;;
   "exec --") (sleep 1; echo survived > "$FAKE_MARKER") & ;;
+  "exec --stubborn") sh -c 'trap "" TERM; echo $$ > "$FAKE_MARKER.pid"; exec >/dev/null 2>&1; sleep 5' & sleep 5 ;;
 esac
 `;
 
@@ -78,6 +79,13 @@ describe("ldev integration", () => {
 		// Real time on purpose: the grandchild is an OS process writing after 1s, which fake timers cannot drive.
 		await Bun.sleep(1500);
 		expect(await fs.exists(marker)).toBe(false);
+	});
+
+	it("returns from a cancelled call only after descendants that ignore SIGTERM are gone", async () => {
+		const pidFile = `${path.join(dir, "marker")}.pid`;
+		await expect(ldev.run(dir, ["exec", "--stubborn"], AbortSignal.timeout(200))).rejects.toThrow();
+		const pid = Number(await fs.readFile(pidFile, "utf8"));
+		expect(() => process.kill(pid, 0)).toThrow();
 	});
 
 	it("reports ldev failures with their exit code and no worktree", async () => {
