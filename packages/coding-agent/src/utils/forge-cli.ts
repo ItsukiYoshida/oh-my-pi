@@ -133,8 +133,9 @@ export async function runForgeCli(
 			// Bun's `signal` reaches only the direct child; group mode signals the group itself.
 			...(processGroup ? { detached: true } : { signal: combinedSignal }),
 		});
-		// Settles once no group member is left, so a cancelled call never returns while a descendant
-		// that ignored SIGTERM (and already closed its stdio) is still running.
+		// Cancellation waits for the group to go away (SIGTERM, then SIGKILL, ~1s each) rather than
+		// returning while a member that ignored SIGTERM is still running. Members that left the group
+		// (setsid) are out of reach; that would need a subreaper.
 		let terminating: Promise<void> | undefined;
 		const killGroup = () => {
 			terminating ??= (async () => {
