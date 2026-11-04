@@ -60,6 +60,11 @@ export interface ForgeCliSpec {
 	installMessage: string;
 	env: Record<string, string | undefined>;
 	timeoutMs: number;
+	/**
+	 * Run in its own process group and signal the whole group on cancel or deadline, for CLIs that
+	 * start long-lived descendants (hooks, wrapped commands). POSIX only.
+	 */
+	processGroup?: boolean;
 }
 
 /** Env shared by every forge CLI: disables git/ssh credential and editor prompts. */
@@ -116,6 +121,7 @@ export async function runForgeCli(
 	if (!$which(spec.bin)) throw new ToolError(spec.installMessage);
 	const timeoutSignal = AbortSignal.timeout(spec.timeoutMs);
 	const combinedSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
+	const processGroup = spec.processGroup === true && process.platform !== "win32";
 	try {
 		const child = Bun.spawn([spec.bin, ...args], {
 			cwd,
@@ -124,17 +130,56 @@ export async function runForgeCli(
 			stdout: "pipe",
 			stderr: "pipe",
 			windowsHide: true,
-			signal: combinedSignal,
+			// Bun's `signal` reaches only the direct child; group mode signals the group itself.
+			...(processGroup ? { detached: true } : { signal: combinedSignal }),
 		});
-		if (!(child.stdout instanceof ReadableStream) || !(child.stderr instanceof ReadableStream)) {
-			throw new ToolError(`Failed to capture ${spec.displayName} output.`);
+		// Cancellation waits for the group to go away (SIGTERM, then SIGKILL, ~1s each) rather than
+		// returning while a member that ignored SIGTERM is still running. Members that left the group
+		// (setsid) are out of reach; that would need a subreaper.
+		let terminating: Promise<void> | undefined;
+		const killGroup = () => {
+			terminating ??= (async () => {
+				const send = (name: NodeJS.Signals | 0) => {
+					try {
+						process.kill(-child.pid, name);
+						return true;
+					} catch {
+						return false;
+					}
+				};
+				const waitGone = async (ms: number) => {
+					for (let waited = 0; waited < ms && send(0); waited += 50) await Bun.sleep(50);
+				};
+				send("SIGTERM");
+				await waitGone(1000);
+				// SIGKILL'd members still need their parent (or init) to reap them.
+				if (send("SIGKILL")) await waitGone(1000);
+			})();
+		};
+		// Descendants can outlive ldev and keep the pipes open, so cancellation stays armed until the
+		// output is collected, not just until the group leader exits.
+		if (processGroup) {
+			if (combinedSignal.aborted) killGroup();
+			else combinedSignal.addEventListener("abort", killGroup, { once: true });
 		}
-		const [stdout, stderr, exitCode] = await Promise.all([
-			readCappedText(child.stdout, spec.bin),
-			readCappedText(child.stderr, spec.bin),
-			child.exited,
-		]);
+		let stdout: CapturedForgeText;
+		let stderr: CapturedForgeText;
+		let exitCode: number | null;
+		try {
+			if (!(child.stdout instanceof ReadableStream) || !(child.stderr instanceof ReadableStream)) {
+				throw new ToolError(`Failed to capture ${spec.displayName} output.`);
+			}
+			[stdout, stderr, exitCode] = await Promise.all([
+				readCappedText(child.stdout, spec.bin),
+				readCappedText(child.stderr, spec.bin),
+				child.exited,
+			]);
+		} finally {
+			combinedSignal.removeEventListener("abort", killGroup);
+		}
+		await terminating;
 		throwIfAborted(signal);
+		if (processGroup && timeoutSignal.aborted) throw timeoutSignal.reason;
 		return {
 			exitCode: exitCode ?? 0,
 			stdout: trimOutput ? stdout.text.trim() : stdout.text,

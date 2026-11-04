@@ -1,0 +1,97 @@
+import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
+import type { ldev as LdevRunner } from "@oh-my-pi/pi-coding-agent/utils/ldev";
+
+// A fake ldev that follows the real CLI's directory handoff: it writes the worktree to
+// LDEV_CD_FILE whenever it would ask a wrapping shell to cd, and echoes its argv.
+const FAKE_LDEV = `#!/bin/sh
+echo "args: $*"
+case "$1 $2" in
+  "issue start"|"issue resume") printf '%s' "$FAKE_WORKTREE" > "$LDEV_CD_FILE" ;;
+  "lane status") echo "no binding" >&2; exit 3 ;;
+  "exec --lease") (sleep 1; echo survived > "$FAKE_MARKER") & wait ;;
+  "exec --") (sleep 1; echo survived > "$FAKE_MARKER") & ;;
+  "exec --stubborn") sh -c 'trap "" TERM; echo $$ > "$FAKE_MARKER.pid"; exec >/dev/null 2>&1; sleep 5' & sleep 5 ;;
+esac
+`;
+
+describe("ldev integration", () => {
+	let dir: string;
+	let previousPath: string | undefined;
+	let ldev: typeof LdevRunner;
+
+	beforeAll(async () => {
+		dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-ldev-test-"));
+		await fs.writeFile(path.join(dir, "ldev"), FAKE_LDEV, { mode: 0o755 });
+		await fs.mkdir(path.join(dir, "issue-7"));
+		previousPath = process.env.PATH;
+		process.env.PATH = `${dir}${path.delimiter}${previousPath}`;
+		process.env.FAKE_WORKTREE = path.join(dir, "issue-7");
+		process.env.FAKE_MARKER = path.join(dir, "marker");
+		// The runner snapshots the environment at import, so load it after the fake's variables are set.
+		({ ldev } = await import("@oh-my-pi/pi-coding-agent/utils/ldev"));
+	});
+
+	afterAll(async () => {
+		process.env.PATH = previousPath;
+		delete process.env.FAKE_WORKTREE;
+		delete process.env.FAKE_MARKER;
+		await fs.rm(dir, { recursive: true, force: true });
+	});
+
+	it("starts an issue without launching another agent and hands back its worktree", async () => {
+		const result = await ldev.run(dir, ["issue", "start", "7"]);
+		expect(result.exitCode).toBe(0);
+		expect(result.stdout).toBe("args: issue start 7 --no-agent");
+		expect(result.worktree).toBe(path.join(dir, "issue-7"));
+	});
+
+	it("keeps an explicit agent choice and does not claim the worktree for this session", async () => {
+		const result = await ldev.run(dir, ["issue", "start", "7", "--agent", "omp"]);
+		expect(result.stdout).toBe("args: issue start 7 --agent omp");
+		expect(result.worktree).toBeUndefined();
+
+		const resumed = await ldev.run(dir, ["issue", "resume", "7"]);
+		expect(resumed.worktree).toBeUndefined();
+	});
+
+	it("keeps the injected flag ahead of an argument terminator", async () => {
+		const result = await ldev.run(dir, ["issue", "start", "--no-label", "--", "7"]);
+		expect(result.stdout).toBe("args: issue start --no-label --no-agent -- 7");
+		// Flags after `--` belong to the wrapped command, not to ldev.
+		const exec = await ldev.run(dir, ["issue", "start", "--", "--agent"]);
+		expect(exec.stdout).toBe("args: issue start --no-agent -- --agent");
+		expect(exec.worktree).toBe(path.join(dir, "issue-7"));
+	});
+
+	it("stops commands ldev started when the call is cancelled", async () => {
+		const marker = path.join(dir, "marker");
+		// Uncancelled, the background child does write the marker: the probe below is not vacuous.
+		await ldev.run(dir, ["exec", "--", "true"]);
+		expect(await fs.exists(marker)).toBe(true);
+		await fs.rm(marker);
+
+		await expect(ldev.run(dir, ["exec", "--lease", "--", "true"], AbortSignal.timeout(100))).rejects.toThrow();
+		// ldev itself exits while its background child still holds the output pipes.
+		await expect(ldev.run(dir, ["exec", "--", "true"], AbortSignal.timeout(100))).rejects.toThrow();
+		// Real time on purpose: the grandchild is an OS process writing after 1s, which fake timers cannot drive.
+		await Bun.sleep(1500);
+		expect(await fs.exists(marker)).toBe(false);
+	});
+
+	it("returns from a cancelled call only after descendants that ignore SIGTERM are gone", async () => {
+		const pidFile = `${path.join(dir, "marker")}.pid`;
+		await expect(ldev.run(dir, ["exec", "--stubborn"], AbortSignal.timeout(200))).rejects.toThrow();
+		const pid = Number(await fs.readFile(pidFile, "utf8"));
+		expect(() => process.kill(pid, 0)).toThrow();
+	});
+
+	it("reports ldev failures with their exit code and no worktree", async () => {
+		const result = await ldev.run(dir, ["lane", "status"]);
+		expect(result.exitCode).toBe(3);
+		expect(result.stderr).toBe("no binding");
+		expect(result.worktree).toBeUndefined();
+	});
+});

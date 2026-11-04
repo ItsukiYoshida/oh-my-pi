@@ -23,6 +23,8 @@ import {
 import { formatShakeSummary, type ShakeMode } from "../session/shake-types";
 import { discoverTitleSystemPromptFile, resolvePromptInput } from "../system-prompt";
 import { resolveToCwd } from "../tools/path-utils";
+import { parseCommandArgs } from "../utils/command-args";
+import { formatLdevResult, type LdevResult, ldev } from "../utils/ldev";
 import { commandConsumed, errorMessage, usage } from "./helpers/parse";
 import { handleSshAcp } from "./helpers/ssh";
 import type {
@@ -776,6 +778,72 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 			runtime.ctx.editor.addToHistory(command.text);
 			clearSubmittedText(runtime);
 			await runtime.ctx.handleMoveCommand(command.args || undefined);
+		},
+	},
+	{
+		name: "ldev",
+		icon: "folderMove",
+		description: "Run ldev and move the session into the worktree it hands back",
+		acpDescription: "Run ldev and move the session into the worktree it hands back",
+		inlineHint: "<ldev arguments>",
+		allowArgs: true,
+		handle: async (command, runtime) => {
+			if (runtime.session.isStreaming) return usage("Cannot run /ldev while streaming.", runtime);
+			let args: string[];
+			try {
+				args = parseCommandArgs(command.args, { strict: true });
+			} catch (err) {
+				return usage(errorMessage(err), runtime);
+			}
+			if (args.length === 0) return usage("Usage: /ldev <ldev arguments>", runtime);
+			let result: LdevResult;
+			try {
+				result = await ldev.run(runtime.sessionManager.getCwd(), args, runtime.signal);
+			} catch (err) {
+				return usage(`ldev failed: ${errorMessage(err)}`, runtime);
+			}
+			await runtime.output(formatLdevResult(args, result));
+			if (result.exitCode !== 0) return commandConsumed({ failed: true });
+			if (!result.worktree) return commandConsumed();
+			const failure = await relocateHeadlessSession(runtime, result.worktree);
+			if (failure) return failure;
+			await runtime.output(`Moved to ${runtime.sessionManager.getCwd()}.`);
+			return commandConsumed();
+		},
+		handleTui: async (command, runtime) => {
+			const { ctx } = runtime;
+			ctx.editor.addToHistory(command.text);
+			clearSubmittedText(runtime);
+			if (ctx.session.isStreaming) {
+				ctx.showWarning("Wait for the current response to finish or abort it before running /ldev.");
+				return;
+			}
+			let args: string[];
+			try {
+				args = parseCommandArgs(command.args, { strict: true });
+			} catch (err) {
+				ctx.showError(errorMessage(err));
+				return;
+			}
+			if (args.length === 0) {
+				ctx.showError("Usage: /ldev <ldev arguments>");
+				return;
+			}
+			ctx.showStatus(`Running ldev ${args.join(" ")}…`, { dim: true });
+			let result: LdevResult;
+			try {
+				result = await ldev.run(ctx.sessionManager.getCwd(), args);
+			} catch (err) {
+				ctx.showError(`ldev failed: ${errorMessage(err)}`);
+				return;
+			}
+			const text = formatLdevResult(args, result);
+			if (result.exitCode !== 0) {
+				ctx.showError(text);
+				return;
+			}
+			ctx.showStatus(text, { dim: false });
+			if (result.worktree) await ctx.handleMoveCommand(result.worktree);
 		},
 	},
 	{
