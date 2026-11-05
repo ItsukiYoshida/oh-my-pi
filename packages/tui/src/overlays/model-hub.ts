@@ -321,6 +321,12 @@ const MODEL_KIND_LABELS: Record<"all" | ModelKind, string> = {
 
 const PROVIDER_REFRESH_DEBOUNCE_MS = 120;
 const RECENT_LIMIT = 15;
+/**
+ * Built-in runner providers (search, speech, tiny models) kept out of the
+ * browsable lists. Not `disabledProviders`: that drops them from the registry,
+ * and the roles and tools that run on them would stop resolving.
+ */
+const UNLISTED_PROVIDERS: ReadonlySet<string> = new Set(["web", "local"]);
 /** Accepted compaction limit input, shown beside the field: a scaled base, a fixed trigger, or a percentage. */
 const COMPACTION_INPUT_HINT = "400k base · f400k fixed · 80% · empty resets";
 
@@ -640,7 +646,8 @@ export class ModelHubComponent implements Component {
 		this.#buildRolesRows();
 
 		const mruOrder = this.#settings.mruOrder;
-		this.#availableItems = buildBrowserItems(availableModels);
+		const listedModels = availableModels.filter(model => !UNLISTED_PROVIDERS.has(model.provider));
+		this.#availableItems = buildBrowserItems(listedModels);
 		sortModelItems(this.#availableItems, { roles: this.#roles, mruOrder });
 		this.#browser.setRoles(this.#roles);
 		this.#browser.setMruOrder(mruOrder);
@@ -655,7 +662,7 @@ export class ModelHubComponent implements Component {
 		}
 		this.#recentSelectors = new Set(this.#recentItems.map(item => item.selector));
 
-		this.#buildSidebar(allModels, availableModels);
+		this.#buildSidebar(allModels, listedModels);
 		this.#restoreSidebarAnchor(anchor);
 		this.#applyScope();
 	}
@@ -711,6 +718,10 @@ export class ModelHubComponent implements Component {
 					unlocked.add(provider);
 				}
 			}
+		}
+		for (const provider of UNLISTED_PROVIDERS) {
+			unlocked.delete(provider);
+			locked.delete(provider);
 		}
 
 		const oauthIds = new Set(getOAuthProviders().map(provider => provider.id));
