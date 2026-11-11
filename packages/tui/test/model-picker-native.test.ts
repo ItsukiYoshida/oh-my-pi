@@ -254,6 +254,38 @@ test("a re-sync that moves a role patches the catalogue instead of resending it"
 	]);
 });
 
+test("web and local runners stay out of the browsable lists while roles still resolve to them", () => {
+	const search = model("web", "duckduckgo");
+	const tiny = model("local", "falcon-h1-90m");
+	const models = [...MODELS, search, tiny];
+	const hub = new ModelHubComponent(
+		ui,
+		{
+			...source({ default: "demo/demo", web: "web/duckduckgo" }, ["web/duckduckgo"]),
+			knownRoleIds: ["default", "web"],
+		},
+		registry(models),
+		[],
+		{ onAssign: () => {}, onUnassign: () => {}, onCancel: () => {} },
+	);
+	hubs.push(hub);
+
+	const p = props(hub.describe(withPicker));
+	expect(p.scopes?.map(scope => scope.id)).toEqual([
+		"roles",
+		"all",
+		"provider:anthropic",
+		"provider:demo",
+		"provider:openai",
+	]);
+	expect(p.scopes?.find(scope => scope.id === "all")?.count).toBe(MODELS.length);
+	expect(p.items?.map(item => item.id)).not.toContain("web/duckduckgo");
+	expect(p.items?.map(item => item.id)).not.toContain("local/falcon-h1-90m");
+
+	hub.handleInput("\x1b[A"); // All models → Roles
+	expect(Bun.stripANSI(hub.render(120).join("\n"))).toContain("web/duckduckgo");
+});
+
 test("pointer events drive the hub through the same paths as its keys", () => {
 	const calls = { assign: [] as string[], cancel: 0 };
 	const hub = openHub(calls);

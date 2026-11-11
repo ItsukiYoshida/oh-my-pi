@@ -772,7 +772,7 @@ describe("ModelHub", () => {
 		test("a model with no reasoning surface is assigned without a thinking strip", () => {
 			// inherit/off/auto are all no-ops for an STT/TTS/image model, so the
 			// assignment completes instead of parking on a dead strip (#13111).
-			const model = makeModel("local", "parakeet-tdt-0.6b-v3", 128_000, undefined, "stt");
+			const model = makeModel("deepinfra", "parakeet-tdt-0.6b-v3", 128_000, undefined, "stt");
 			const { hub, onAssign } = createHub({ models: [model], scoped: true });
 			installTestTheme();
 
@@ -1107,7 +1107,7 @@ describe("ModelHub", () => {
 
 		test("role strip offers only roles the model can fill", () => {
 			const chat = makeModel("test", "chat-model");
-			const search = makeModel("web", "perplexity", 128_000, undefined, "search");
+			const search = makeModel("perplexity", "perplexity", 128_000, undefined, "search");
 			const { hub } = createHub({ models: [chat, search], scoped: true });
 			hub.handleInput("\t");
 

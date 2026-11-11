@@ -77,6 +77,14 @@ export function resolveCompactionMethodOrder(value: unknown): CompactionMethod[]
 	return methods;
 }
 
+/** Adaptive order only reorders enabled methods; manual compaction keeps the user's order. */
+export function resolveAutoCompactionMethodOrder(settings: CompactionSettings): CompactionMethod[] {
+	const configured = resolveCompactionMethodOrder(settings.methodOrder);
+	if (!settings.adaptiveEnabled) return configured;
+	const preferred: CompactionMethod[] = ["shake", "remote", "soft", "snapcompact", "handoff"];
+	return preferred.filter(method => configured.includes(method));
+}
+
 const STRATEGY_BY_COMPACTION_METHOD: Record<CompactionMethod, "context-full" | "handoff" | "shake" | "snapcompact"> = {
 	remote: "context-full",
 	snapcompact: "snapcompact",
@@ -121,8 +129,11 @@ export function resolveSpeculationMethod(
 	settings: CompactionSettings,
 	{ skipRemote = false }: { skipRemote?: boolean } = {},
 ): "remote" | "handoff" | "soft" | undefined {
-	for (const candidate of resolveCompactionMethodOrder(settings.methodOrder)) {
+	for (const candidate of resolveAutoCompactionMethodOrder(settings)) {
 		if (skipRemote && candidate === "remote") continue;
+		// Adaptive shake is gated by a history preflight in SessionMaintenance.
+		// Without that history, expose the first possible speculative fallback.
+		if (settings.adaptiveEnabled && candidate === "shake") continue;
 		const available =
 			candidate === "remote"
 				? canUseRemoteCompaction(model, resolveMethodSettings(settings, candidate))
