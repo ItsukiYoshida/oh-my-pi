@@ -2649,6 +2649,22 @@ export class TUI extends Container {
 	}
 
 	/**
+	 * Whether this paint goes inside DEC 2026. A multiplexer that redraws the
+	 * whole pane at every sync end keeps sync only for destructive replays,
+	 * where a torn frame is worse than one redraw; ordinary frames use the
+	 * unsynchronized discipline so the outer cursor stays put between frames.
+	 * An explicit force-on still syncs every paint.
+	 */
+	#paintSynchronized(destructive: boolean): boolean {
+		return (
+			this.#synchronizedOutputEnabled &&
+			(destructive ||
+				classifyTerminalMultiplexerModule()?.redrawsPaneOnSynchronizedOutputEnd !== true ||
+				synchronizedOutputUserOverride() === true)
+		);
+	}
+
+	/**
 	 * Retire every eligible history batch into native scrollback before quitting.
 	 *
 	 * The only frame path that deliberately does not composite overlays. Its
@@ -3833,7 +3849,11 @@ export class TUI extends Container {
 		const newTop = Math.max(0, Math.min(startTop + historyRows.length, height - rows));
 		const pendingAltExit = this.#pendingAltExit;
 		// A fused resize exit whose borrow never painted still owes its entry.
-		let buffer = this.#paintBeginSequence + (pendingAltExit ? this.#takePendingAltEnter() : "") + pendingAltExit;
+		const synchronized = this.#paintSynchronized(destructiveReset || pendingAltExit !== "");
+		let buffer =
+			(synchronized ? PAINT_BEGIN : PAINT_BEGIN_NO_SYNC) +
+			(pendingAltExit ? this.#takePendingAltEnter() : "") +
+			pendingAltExit;
 		const renewSync =
 			destructiveReset &&
 			this.#resizeScrollbackMode === "rebuild" &&
@@ -3894,7 +3914,7 @@ export class TUI extends Container {
 		// Without synchronized output the terminal may show any prefix of this
 		// write, so move surviving rows instead of repainting through them.
 		const moved =
-			!this.#synchronizedOutputEnabled &&
+			!synchronized &&
 			geometryStable &&
 			!destructiveReset &&
 			history?.kind !== "replay" &&
@@ -3996,7 +4016,7 @@ export class TUI extends Container {
 			buffer += `\x1b[?25l\x1b[${mutableTop + 1};1H`;
 			this.#parkedViewportOffset = 0;
 		}
-		buffer += this.#paintEndSequence;
+		buffer += synchronized ? PAINT_END : PAINT_END_NO_SYNC;
 		if (
 			renewSync &&
 			pendingAltExit === "" &&
@@ -4813,7 +4833,8 @@ export class TUI extends Container {
 		} else if (hideCursor) {
 			cursorBuffer = "\x1b[?25l";
 		}
-		const frame = `${this.#paintBeginSequence}${prelude}${full ? "\x1b[H" : ""}${rowsBuffer}${cursorBuffer}${this.#paintEndSequence}`;
+		const synchronized = this.#paintSynchronized(false);
+		const frame = `${synchronized ? PAINT_BEGIN : PAINT_BEGIN_NO_SYNC}${prelude}${full ? "\x1b[H" : ""}${rowsBuffer}${cursorBuffer}${synchronized ? PAINT_END : PAINT_END_NO_SYNC}`;
 		this.terminal.write(frame);
 		this.#notifyFrameWrite(frame);
 		this.#debugPaint = {

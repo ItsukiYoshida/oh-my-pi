@@ -306,6 +306,7 @@ function advertisesSynchronizedOutput(termFeatures: string | undefined): boolean
  *   6. Everything else starts off, including risky multiplexers; the runtime
  *      DECRQM probe upgrades any of them when the terminal actually reports
  *      `?2026` supported (current zellij, tmux master, foot, contour, mintty…).
+ *      tmux then syncs only destructive replays (`redrawsPaneOnSynchronizedOutputEnd`).
  */
 export function shouldEnableSynchronizedOutputByDefault(
 	env: NodeJS.ProcessEnv = Bun.env,

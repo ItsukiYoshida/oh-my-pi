@@ -84,6 +84,13 @@ export interface TerminalMultiplexerModule<Id extends string = string> {
 	 */
 	readonly honorsSynchronizedOutput?: boolean;
 	/**
+	 * Ends each synchronized update with a full pane redraw whose cursor move
+	 * and hide reach the outer terminal outside its own sync. At ~30 fps the
+	 * outer cursor jumps and blinks between frames, dragging IME composition
+	 * text with it, so only destructive replays keep DEC 2026 there.
+	 */
+	readonly redrawsPaneOnSynchronizedOutputEnd?: boolean;
+	/**
 	 * Tracks DEC 2004 per pane and forwards paste markers only while it is set,
 	 * yet may leave DECRQM 2004 unanswered, so bracketed paste is reasserted
 	 * without waiting for a DECRPM confirmation.

@@ -38,6 +38,7 @@ export const tmuxMultiplexer = {
 	expandsRepPadding: true,
 	// tmux expires synchronized output after one second.
 	expiresSynchronizedOutput: true,
+	redrawsPaneOnSynchronizedOutputEnd: true,
 	altRestoreEndsSynchronizedOutput: true,
 	growsBeforeSigwinch: true,
 } as const satisfies TerminalMultiplexerModule;

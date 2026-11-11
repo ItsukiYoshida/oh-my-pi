@@ -171,6 +171,44 @@ describe("tmux synchronized rebuild", () => {
 		}
 	});
 
+	it("paints ordinary frames outside DEC 2026 while rebuilds stay synchronized", async () => {
+		// tmux redraws the whole pane at each sync end and moves/hides the outer
+		// cursor outside its own sync, so per-frame sync drags IME text around.
+		const { terminal, scheduler, tui } = await startRig(50);
+		try {
+			expect(tui.synchronizedOutput).toBe(true);
+			tui.requestRender(true);
+			await scheduler.settle(terminal);
+			const ordinary = terminal.written.join("");
+			expect(ordinary).toContain("editor@80");
+			expect(ordinary).not.toContain(SYNC_BEGIN);
+			terminal.written = [];
+			terminal.resize(90, 26);
+			await scheduler.advance(terminal, 200);
+			const rebuild = terminal.written.join("");
+			expect(rebuild).toContain("\x1b[3J");
+			expect(rebuild).toContain(SYNC_BEGIN);
+			expect(rebuild).toContain(SYNC_END);
+		} finally {
+			tui.stop();
+		}
+	});
+
+	it("keeps ordinary frames synchronized when the user forces sync on", async () => {
+		spyOn(capabilities, "synchronizedOutputUserOverride").mockReturnValue(true);
+		spyOn(capabilities, "shouldEnableSynchronizedOutputByDefault").mockReturnValue(true);
+		const { terminal, scheduler, tui } = await startRig(50);
+		try {
+			tui.requestRender(true);
+			await scheduler.settle(terminal);
+			const ordinary = terminal.written.join("");
+			expect(ordinary).toContain("editor@80");
+			expect(ordinary).toContain(SYNC_BEGIN);
+		} finally {
+			tui.stop();
+		}
+	});
+
 	it("publishes the notice as its own synchronized update right before a large replay", async () => {
 		const { terminal, scheduler, provider, tui } = await startLargeRig();
 		try {
