@@ -74,6 +74,11 @@ export const BUILTIN_TOOL_HELP: Record<BuiltinToolName, BuiltinToolHelp> = {
 	rewind: { summary: "Rewind to a saved checkpoint", defaultState: "off" },
 	context_notes: { summary: "Read or replace the session's persistent context notes", defaultState: "off" },
 	new_context: { summary: "Request a fresh context window after the current turn", defaultState: "off" },
+	move: {
+		summary: "Move the session to another working directory",
+		defaultState: "detected",
+		detectedWhen: "the host supports session moves (top-level interactive sessions)",
+	},
 	retain: { summary: "Store facts in long-term memory", defaultState: "off" },
 	recall: { summary: "Search long-term memory", defaultState: "off" },
 	reflect: { summary: "Synthesize an answer from long-term memory", defaultState: "off" },
