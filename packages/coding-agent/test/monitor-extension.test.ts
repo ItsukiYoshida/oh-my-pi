@@ -1,9 +1,11 @@
+import * as path from "node:path";
 import { afterEach, expect, test, vi } from "bun:test";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import monitor from "../examples/extensions/monitor";
+import { readLogins, renewedLogins } from "../examples/extensions/monitor/logins";
 import { ModelRegistry } from "../src/config/model-registry";
 import { Settings } from "../src/config/settings";
 import * as exec from "../src/exec/exec";
@@ -143,4 +145,41 @@ test("/monitor watches a PR outside the current branch and reports its merge", a
 	await poll();
 	expect(stream).toHaveBeenCalledTimes(1);
 	expect(events()[0]).toContain("PR is now MERGED");
+});
+
+test("an AWS SSO or gcloud login is reported once, while client registrations and unchanged tokens are not", async () => {
+	const home = TempDir.createSync("omp-monitor-home-");
+	cleanups.push(() => home.remove());
+	const cache = path.join(home.path(), ".aws", "sso", "cache");
+	const gcloud = path.join(home.path(), "gcloud");
+	const env = { CLOUDSDK_CONFIG: gcloud };
+	await Bun.write(
+		path.join(cache, "client.json"),
+		JSON.stringify({ clientId: "c", expiresAt: "2026-01-01T00:00:00Z" }),
+	);
+	const before = await readLogins(env, home.path());
+	expect(renewedLogins(before, await readLogins(env, home.path()))).toEqual([]);
+
+	const token = {
+		startUrl: "https://acme.awsapps.com/start",
+		accessToken: "secret",
+		expiresAt: "2026-11-22T08:00:00Z",
+	};
+	await Bun.write(path.join(cache, "token.json"), JSON.stringify(token));
+	await Bun.write(
+		path.join(cache, "client.json"),
+		JSON.stringify({ clientId: "c", expiresAt: "2027-01-01T00:00:00Z" }),
+	);
+	await Bun.write(path.join(gcloud, "credentials.db"), "db");
+	const loggedIn = await readLogins(env, home.path());
+	expect(renewedLogins(before, loggedIn).sort()).toEqual([
+		"AWS SSO https://acme.awsapps.com/start",
+		"gcloud auth login",
+	]);
+	expect([...loggedIn.values()].join()).not.toContain("secret");
+
+	await Bun.write(path.join(cache, "token.json"), JSON.stringify({ ...token, expiresAt: "2026-11-22T16:00:00Z" }));
+	expect(renewedLogins(loggedIn, await readLogins(env, home.path()))).toEqual([
+		"AWS SSO https://acme.awsapps.com/start",
+	]);
 });
