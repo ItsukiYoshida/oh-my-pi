@@ -109,7 +109,9 @@ function parseTarget(input: string): { repo?: string; number?: string } | typeof
 	const text = input.trim();
 	if (text === AUTO) return AUTO;
 	const match =
-		/^(?:https?:\/\/)?github\.com\/([\w.-]+\/[\w.-]+?)(?:\.git)?(?:\/pull\/(\d+))?\/?(?:[?#].*)?$/.exec(text) ??
+		/^(?:https?:\/\/|git@|ssh:\/\/git@)?github\.com[/:]([\w.-]+\/[\w.-]+?)(?:\.git)?(?:\/pull\/(\d+))?\/?(?:[?#].*)?$/.exec(
+			text,
+		) ??
 		/^([\w.-]+\/[\w.-]+)(?:#(\d+))?$/.exec(text) ??
 		/^()#?(\d+)$/.exec(text);
 	if (!match) return undefined;
@@ -134,8 +136,19 @@ export default function monitor(pi: ExtensionAPI): void {
 			.then(result => result.stdout.trim());
 		const login = await viewer;
 		if (target === AUTO) {
+			// gh resolves the branch PR against its default repo, which is `upstream` in a fork checkout;
+			// a PR opened inside the fork (origin) is only found by asking origin for the branch explicitly.
+			let pr = (await gh(["pr", "view", "--json", PR_FIELDS]).catch(() => undefined)) as PullRequest | undefined;
+			if (!pr) {
+				const branch = (await pi.exec("git", ["branch", "--show-current"], { cwd })).stdout.trim();
+				const origin = parseTarget((await pi.exec("git", ["remote", "get-url", "origin"], { cwd })).stdout);
+				if (branch && origin !== AUTO && origin?.repo) {
+					pr = (await gh(["pr", "view", branch, "--repo", origin.repo, "--json", PR_FIELDS]).catch(
+						() => undefined,
+					)) as PullRequest | undefined;
+				}
+			}
 			// No PR for this branch (or no GitHub remote): nothing to watch yet; a PR opened later is picked up.
-			const pr = (await gh(["pr", "view", "--json", PR_FIELDS]).catch(() => undefined)) as PullRequest | undefined;
 			return pr && { subject: pr.url, changes: prChanges(pr, login) };
 		}
 		const [repo, number] = target.split("#");

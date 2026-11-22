@@ -43,15 +43,21 @@ function pullRequest(): PullRequestFixture {
 	};
 }
 
-/** `branchPr`: the PR `gh pr view` finds for the checked-out branch, if any. */
-async function openSession(pr: PullRequestFixture, branchPr: boolean) {
+/**
+ * `forkBranchPr`: the checkout is a fork (gh's default repo is upstream) whose branch has a PR in origin,
+ * so only `gh pr view <branch> --repo <origin>` finds it.
+ */
+async function openSession(pr: PullRequestFixture, forkBranchPr: boolean) {
 	const dir = TempDir.createSync("omp-monitor-");
 	cleanups.push(() => dir.remove());
 	vi.spyOn(exec, "execCommand").mockImplementation(async (command, args) => {
-		expect(command).toBe("gh");
+		const call = [command, ...args].join(" ");
 		let stdout = "";
-		if (args[0] === "api" && args[1] === "user") stdout = "me\n";
-		else if (args[0] === "pr" && (args[2] === "7" || branchPr)) stdout = JSON.stringify(pr);
+		if (call === "gh api user --jq .login") stdout = "me\n";
+		else if (call === "git branch --show-current") stdout = "feature\n";
+		else if (call === "git remote get-url origin") stdout = "git@github.com:acme/app.git\n";
+		else if (call.startsWith("gh pr view 7 --repo acme/app ")) stdout = JSON.stringify(pr);
+		else if (forkBranchPr && call.startsWith("gh pr view feature --repo acme/app ")) stdout = JSON.stringify(pr);
 		return { stdout, stderr: stdout ? "" : "no pull requests found", code: stdout ? 0 : 1, killed: false };
 	});
 	// Drive polls directly instead of waiting out the 60s interval.
