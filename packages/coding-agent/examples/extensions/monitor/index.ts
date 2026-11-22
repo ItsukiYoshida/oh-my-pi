@@ -2,8 +2,11 @@ import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import { isRecord, prompt, sanitizeText } from "@oh-my-pi/pi-utils";
 import context from "./context.md" with { type: "text" };
 import eventTemplate from "./event.md" with { type: "text" };
+import loginTemplate from "./login.md" with { type: "text" };
+import { type LoginState, readLogins, renewedLogins } from "./logins";
 
 const POLL_MS = 60_000;
+const LOGIN_POLL_MS = 10_000;
 const AUTO = "auto";
 const STATE_ENTRY = "monitor-targets";
 const PR_FIELDS = "url,state,headRefOid,reviews,comments,statusCheckRollup";
@@ -250,6 +253,25 @@ export default function monitor(pi: ExtensionAPI): void {
 		watches = targets.map(target => ({ target }));
 		ctx.setTimeout(tick, 0);
 		ctx.setInterval(tick, POLL_MS);
+
+		let logins: LoginState | undefined;
+		const checkLogins = async () => {
+			const current = await readLogins();
+			const renewed = logins ? renewedLogins(logins, current) : [];
+			logins = current;
+			if (renewed.length === 0) return;
+			pi.sendMessage(
+				{
+					customType: "monitor-login",
+					content: prompt.render(loginTemplate, { logins: renewed }),
+					display: true,
+					attribution: "agent",
+				},
+				{ deliverAs: "aside", triggerTurn: true },
+			);
+		};
+		ctx.setTimeout(checkLogins, 0);
+		ctx.setInterval(checkLogins, LOGIN_POLL_MS);
 	});
 
 	pi.registerTool({
