@@ -9,7 +9,7 @@ const POLL_MS = 60_000;
 const LOGIN_POLL_MS = 10_000;
 const AUTO = "auto";
 const STATE_ENTRY = "monitor-targets";
-const PR_FIELDS = "url,state,headRefOid,reviews,comments,statusCheckRollup";
+const PR_FIELDS = "url,state,headRefOid,baseRefName,mergeable,reviews,comments,statusCheckRollup";
 const FAILED = new Set(["FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE"]);
 const PASSED = new Set(["SUCCESS", "NEUTRAL", "SKIPPED"]);
 
@@ -38,6 +38,9 @@ interface PullRequest {
 	url: string;
 	state: string;
 	headRefOid: string;
+	baseRefName: string;
+	/** `MERGEABLE`, `CONFLICTING`, or `UNKNOWN` while GitHub recomputes it (e.g. right after the base moved). */
+	mergeable: string;
 	reviews: { id: string; author?: Author; state: string; body: string }[];
 	comments: { id: string; author?: Author; body: string; url: string }[];
 	statusCheckRollup: {
@@ -62,8 +65,29 @@ function quote(text: string): string {
 	return flat ? ` "${flat.length > 200 ? `${flat.slice(0, 200)}…` : flat}"` : "";
 }
 
-function prChanges(pr: PullRequest): Change[] {
+/** `baseSha`: current tip of the base branch, for open PRs only (the PR's own `baseRefOid` lags behind it). */
+function prChanges(pr: PullRequest, baseSha?: string): Change[] {
 	const changes: Change[] = [{ key: `state:${pr.state}`, text: `PR is now ${pr.state}` }];
+	if (baseSha) {
+		// A conflict gets its own line below, so the base line only states the other outcomes.
+		const merge =
+			pr.mergeable === "MERGEABLE"
+				? "; the PR still merges cleanly"
+				: pr.mergeable === "CONFLICTING"
+					? ""
+					: "; GitHub has not finished checking for conflicts yet (a conflict is reported once found)";
+		changes.push({
+			key: `base:${baseSha}`,
+			text: `Base branch "${pr.baseRefName}" moved to ${baseSha.slice(0, 7)}${merge}`,
+		});
+		// Keyed by both tips: a conflict found after the base-move poll, or surviving a new push, is still news.
+		if (pr.mergeable === "CONFLICTING") {
+			changes.push({
+				key: `conflict:${baseSha}:${pr.headRefOid}`,
+				text: `CONFLICT: the PR has merge conflicts with "${pr.baseRefName}" (${baseSha.slice(0, 7)}) and needs a rebase or merge of the base`,
+			});
+		}
+	}
 	for (const review of pr.reviews) {
 		changes.push({
 			key: `review:${review.id}`,
@@ -144,15 +168,28 @@ export default function monitor(pi: ExtensionAPI): void {
 				}
 			}
 			// No PR for this branch (or no GitHub remote): nothing to watch yet; a PR opened later is picked up.
-			return pr && { subject: pr.url, changes: prChanges(pr) };
+			return pr && prSnapshot(pr);
 		}
 		const [repo, number] = target.split("#");
 		if (number) {
-			const pr = (await gh(["pr", "view", number, "--repo", repo, "--json", PR_FIELDS])) as PullRequest;
-			return { subject: pr.url, changes: prChanges(pr) };
+			return prSnapshot((await gh(["pr", "view", number, "--repo", repo, "--json", PR_FIELDS])) as PullRequest);
 		}
 		const events = (await gh(["api", `repos/${repo}/events?per_page=50`])) as RepoEvent[];
 		return { subject: `https://github.com/${repo}`, changes: repoChanges(events) };
+	}
+
+	async function prSnapshot(pr: PullRequest): Promise<Snapshot> {
+		const base = parseTarget(pr.url);
+		let baseSha: string | undefined;
+		if (pr.state === "OPEN" && base !== AUTO && base?.repo) {
+			const result = await pi.exec("gh", ["api", `repos/${base.repo}/commits/${pr.baseRefName}`, "--jq", ".sha"], {
+				cwd,
+				timeout: 30_000,
+			});
+			if (result.code !== 0) throw new Error(sanitizeText(result.stderr.trim() || "gh api failed"));
+			baseSha = result.stdout.trim();
+		}
+		return { subject: pr.url, changes: prChanges(pr, baseSha) };
 	}
 
 	async function poll(watch: Watch): Promise<void> {

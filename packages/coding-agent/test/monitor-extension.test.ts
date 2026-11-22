@@ -29,6 +29,10 @@ interface PullRequestFixture {
 	url: string;
 	state: string;
 	headRefOid: string;
+	baseRefName: string;
+	mergeable: string;
+	/** Tip of the base branch on GitHub; not part of `gh pr view` output. */
+	baseTip: string;
 	reviews: object[];
 	comments: object[];
 	statusCheckRollup: object[];
@@ -39,6 +43,9 @@ function pullRequest(): PullRequestFixture {
 		url: "https://github.com/acme/app/pull/7",
 		state: "OPEN",
 		headRefOid: "abc1234def",
+		baseRefName: "main",
+		mergeable: "MERGEABLE",
+		baseTip: "base000aaa",
 		reviews: [],
 		comments: [],
 		statusCheckRollup: [{ name: "build", status: "IN_PROGRESS", conclusion: "" }],
@@ -57,6 +64,7 @@ async function openSession(pr: PullRequestFixture, forkBranchPr: boolean) {
 		let stdout = "";
 		if (call === "git branch --show-current") stdout = "feature\n";
 		else if (call === "git remote get-url origin") stdout = "git@github.com:acme/app.git\n";
+		else if (call === "gh api repos/acme/app/commits/main --jq .sha") stdout = `${pr.baseTip}\n`;
 		else if (call.startsWith("gh pr view 7 --repo acme/app ")) stdout = JSON.stringify(pr);
 		else if (forkBranchPr && call.startsWith("gh pr view feature --repo acme/app ")) stdout = JSON.stringify(pr);
 		return { stdout, stderr: stdout ? "" : "no pull requests found", code: stdout ? 0 : 1, killed: false };
@@ -145,6 +153,36 @@ test("/monitor watches a PR outside the current branch and reports its merge", a
 	await poll();
 	expect(stream).toHaveBeenCalledTimes(1);
 	expect(events()[0]).toContain("PR is now MERGED");
+});
+
+test("a base-branch move is reported, and a conflict with it is called out even when detected a poll later", async () => {
+	const pr = pullRequest();
+	const { stream, poll, events } = await openSession(pr, true);
+	await poll(); // baseline
+
+	pr.baseTip = "base111bbb";
+	pr.mergeable = "UNKNOWN";
+	await poll();
+	expect(stream).toHaveBeenCalledTimes(1);
+	expect(events()[0]).toContain('Base branch "main" moved to base111; GitHub has not finished checking for conflicts');
+	expect(events()[0]).not.toContain("CONFLICT:");
+
+	pr.mergeable = "CONFLICTING";
+	await poll();
+	expect(stream).toHaveBeenCalledTimes(2);
+	expect(events()[1]).toContain('CONFLICT: the PR has merge conflicts with "main" (base111)');
+	expect(events()[1]).not.toContain("moved to");
+
+	pr.baseTip = "base222ccc";
+	await poll();
+	expect(events()[2]).toContain('Base branch "main" moved to base222\n');
+	expect(events()[2]).toContain('CONFLICT: the PR has merge conflicts with "main" (base222)');
+
+	pr.baseTip = "base333ddd";
+	pr.mergeable = "MERGEABLE";
+	await poll();
+	expect(events()[3]).toContain('Base branch "main" moved to base333; the PR still merges cleanly');
+	expect(events()[3]).not.toContain("CONFLICT:");
 });
 
 test("an AWS SSO or gcloud login is reported once, while client registrations and unchanged tokens are not", async () => {
