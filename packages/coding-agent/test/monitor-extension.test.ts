@@ -53,8 +53,7 @@ async function openSession(pr: PullRequestFixture, forkBranchPr: boolean) {
 	vi.spyOn(exec, "execCommand").mockImplementation(async (command, args) => {
 		const call = [command, ...args].join(" ");
 		let stdout = "";
-		if (call === "gh api user --jq .login") stdout = "me\n";
-		else if (call === "git branch --show-current") stdout = "feature\n";
+		if (call === "git branch --show-current") stdout = "feature\n";
 		else if (call === "git remote get-url origin") stdout = "git@github.com:acme/app.git\n";
 		else if (call.startsWith("gh pr view 7 --repo acme/app ")) stdout = JSON.stringify(pr);
 		else if (forkBranchPr && call.startsWith("gh pr view feature --repo acme/app ")) stdout = JSON.stringify(pr);
@@ -112,7 +111,7 @@ async function openSession(pr: PullRequestFixture, forkBranchPr: boolean) {
 	return { session, stream, poll, events };
 }
 
-test("the branch's PR is monitored without setup: others' activity wakes the agent once, its own comments never", async () => {
+test("the branch's PR is monitored without setup: every account's activity wakes the agent once", async () => {
 	const pr = pullRequest();
 	const { stream, poll, events } = await openSession(pr, true);
 	await poll(); // baseline
@@ -127,7 +126,7 @@ test("the branch's PR is monitored without setup: others' activity wakes the age
 	expect(events()).toHaveLength(1);
 	expect(events()[0]).toContain('Review CHANGES_REQUESTED by @alice: "Please rename foo"');
 	expect(events()[0]).toContain('Check "build" FAILURE on abc1234: https://ci/1');
-	expect(events()[0]).not.toContain("Working on it");
+	expect(events()[0]).toContain('Comment by @me: "Working on it"');
 
 	await poll();
 	expect(stream).toHaveBeenCalledTimes(1);

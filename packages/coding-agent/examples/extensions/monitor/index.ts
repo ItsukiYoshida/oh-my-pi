@@ -59,16 +59,15 @@ function quote(text: string): string {
 	return flat ? ` "${flat.length > 200 ? `${flat.slice(0, 200)}…` : flat}"` : "";
 }
 
-function prChanges(pr: PullRequest, viewer: string): Change[] {
-	// Skip the operator's own account: the agent posts as that account, so its replies would wake it again.
+function prChanges(pr: PullRequest): Change[] {
 	const changes: Change[] = [{ key: `state:${pr.state}`, text: `PR is now ${pr.state}` }];
-	for (const review of pr.reviews.filter(review => review.author?.login !== viewer)) {
+	for (const review of pr.reviews) {
 		changes.push({
 			key: `review:${review.id}`,
 			text: `Review ${review.state} by @${review.author?.login}:${quote(review.body)}`,
 		});
 	}
-	for (const comment of pr.comments.filter(comment => comment.author?.login !== viewer)) {
+	for (const comment of pr.comments) {
 		changes.push({
 			key: `comment:${comment.id}`,
 			text: `Comment by @${comment.author?.login}:${quote(comment.body)} ${comment.url}`,
@@ -91,17 +90,15 @@ function prChanges(pr: PullRequest, viewer: string): Change[] {
 	return changes;
 }
 
-function repoChanges(events: RepoEvent[], viewer: string): Change[] {
-	return events
-		.filter(event => event.actor?.login !== viewer)
-		.map(event => {
-			const number = event.payload?.pull_request?.number ?? event.payload?.issue?.number;
-			const details = [event.payload?.action, number && `#${number}`, event.payload?.ref].filter(Boolean).join(" ");
-			return {
-				key: `event:${event.id}`,
-				text: `${event.type} by @${event.actor?.login}${details && ` (${details})`}`,
-			};
-		});
+function repoChanges(events: RepoEvent[]): Change[] {
+	return events.map(event => {
+		const number = event.payload?.pull_request?.number ?? event.payload?.issue?.number;
+		const details = [event.payload?.action, number && `#${number}`, event.payload?.ref].filter(Boolean).join(" ");
+		return {
+			key: `event:${event.id}`,
+			text: `${event.type} by @${event.actor?.login}${details && ` (${details})`}`,
+		};
+	});
 }
 
 /** Normalizes a PR URL, repo URL, `owner/repo#N`, `#N`/`N` (current repo), `owner/repo`, or `auto`. */
@@ -121,7 +118,6 @@ function parseTarget(input: string): { repo?: string; number?: string } | typeof
 export default function monitor(pi: ExtensionAPI): void {
 	let watches: Watch[] = [];
 	let cwd = process.cwd();
-	let viewer: Promise<string> | undefined;
 	let polling = false;
 
 	async function gh(args: string[]): Promise<unknown> {
@@ -131,10 +127,6 @@ export default function monitor(pi: ExtensionAPI): void {
 	}
 
 	async function snapshot(target: string): Promise<Snapshot | undefined> {
-		viewer ??= pi
-			.exec("gh", ["api", "user", "--jq", ".login"], { cwd, timeout: 30_000 })
-			.then(result => result.stdout.trim());
-		const login = await viewer;
 		if (target === AUTO) {
 			// gh resolves the branch PR against its default repo, which is `upstream` in a fork checkout;
 			// a PR opened inside the fork (origin) is only found by asking origin for the branch explicitly.
@@ -149,15 +141,15 @@ export default function monitor(pi: ExtensionAPI): void {
 				}
 			}
 			// No PR for this branch (or no GitHub remote): nothing to watch yet; a PR opened later is picked up.
-			return pr && { subject: pr.url, changes: prChanges(pr, login) };
+			return pr && { subject: pr.url, changes: prChanges(pr) };
 		}
 		const [repo, number] = target.split("#");
 		if (number) {
 			const pr = (await gh(["pr", "view", number, "--repo", repo, "--json", PR_FIELDS])) as PullRequest;
-			return { subject: pr.url, changes: prChanges(pr, login) };
+			return { subject: pr.url, changes: prChanges(pr) };
 		}
 		const events = (await gh(["api", `repos/${repo}/events?per_page=50`])) as RepoEvent[];
-		return { subject: `https://github.com/${repo}`, changes: repoChanges(events, login) };
+		return { subject: `https://github.com/${repo}`, changes: repoChanges(events) };
 	}
 
 	async function poll(watch: Watch): Promise<void> {
